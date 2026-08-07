@@ -1,3 +1,6 @@
-// Re-export the plugin for use by npm consumers
-export { CrofAIPlugin } from './crofai-plugin.js';
-export { CrofAIPlugin as default } from './crofai-plugin.js';
+import { createOpenAICompatibleEndpointsPlugin } from './plugin.js';
+
+export default {
+  id: 'opencode-openai-compatible',
+  server: createOpenAICompatibleEndpointsPlugin,
+};

@@ -3,13 +3,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Determine log directory based on platform
-const getLogDir = () => {
-  const home = homedir();
-  if (process.platform === 'win32') {
-    return join(home, '.local', 'share', 'opencode', 'log', 'opencode-crofai');
-  } else {
-    return join(home, '.local', 'share', 'opencode', 'log', 'opencode-crofai');
-  }
+const getLogDir = (): string => {
+  return join(homedir(), '.local', 'share', 'opencode', 'log', 'opencode-openai-compatible');
 };
 
 let logFile: string | null = null;
@@ -23,7 +18,7 @@ export async function initLogger(_client: any) {
   initialized = true;
 
   // Check environment variables synchronously
-  const debugEnv = process.env.OPENCODE_PLUGIN_CROFAI_DEBUG?.toLowerCase();
+  const debugEnv = process.env.OPENCODE_PLUGIN_OPENAI_COMPATIBLE_DEBUG?.toLowerCase();
 
   if (debugEnv !== '1' && debugEnv !== 'true') {
     return;

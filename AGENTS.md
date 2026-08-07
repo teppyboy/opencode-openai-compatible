@@ -4,7 +4,7 @@
 
 - **Build**: `bun run build` or `bun build src/index.ts src/factory.ts --outdir dist --target bun`
 - **Test**: `bun test` or `bun test tests`
-- **Single Test**: `bun test tests/crofai-plugin.test.ts` (use file glob pattern)
+- **Single Test**: `bun test tests/plugin.test.ts` (use file glob pattern)
 - **Watch Mode**: `bun test --watch`
 - **Lint**: `bun run lint` (eslint)
 - **Format**: `bun run format` (prettier)
@@ -29,11 +29,11 @@
 
 - **NeverNesters**: avoid deeply nested structures. Always exit early.
 - **Strict mode**: enforced (`"strict": true`)
-- **Classes**: PascalCase (e.g., `BackgroundTask`, `BackgroundTaskManager`)
+- **Classes**: PascalCase (e.g., `OpenAICompatibleEndpointOptions`)
 - **Methods/properties**: camelCase
-- **Status strings**: use union types (e.g., `'pending' | 'running' | 'completed' | 'failed' | 'cancelled'`)
+- **Status strings**: use union types (e.g., `'active' | 'paused'`)
 - **Explicit types**: prefer explicit type annotations over inference
-- **Return types**: optional (not required but recommended for public methods)
+- **Return types**: optional (not required but recommended for public functions)
 
 ### Error Handling
 
@@ -49,7 +49,7 @@
 
 ## Testing
 
-- Framework: **vitest** with `describe` & `it` blocks
+- Framework: **vitest** (with `bun test`) using `describe` & `it` blocks
 - Style: Descriptive nested test cases with clear expectations
 - Assertion library: `expect()` (vitest)
 
@@ -61,82 +61,100 @@
 
 - **Type**: ES Module package for Bun modules
 - **Target**: Bun runtime, ES2021+
-- **Purpose**: OpenCode plugin for CrofAI integration, with reusable OpenAI-compatible provider factory for forks
+- **Purpose**: OpenCode plugin registering one or more configurable OpenAI-compatible endpoints
+  as providers, with a reusable single-provider factory for forks
 
-## CrofAI Integration Plugin
+## Multi-Endpoint Plugin
 
 ### Overview
 
-A plugin that connects OpenCode to CrofAI's OpenAI-compatible API. It automatically discovers available models, caches them for fast startup, refreshes the cache in background, and distinguishes model variants like Lightning and Precision without duplicate suffixes.
-
-### Installation
-
-Add the plugin to your `opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@tretrauit/opencode-crofai"]
-}
-```
-
-OpenCode will fetch the package from npm at startup and install it with Bun.
+`opencode-openai-compatible` registers every user-configured OpenAI-compatible endpoint from the
+`opencode.json` `plugin` options tuple. It discovers models via `GET {baseURL}/models`, caches
+them per endpoint, refreshes caches in the background, and normalizes variant display names
+(Lightning, Precision, Flash, ...) without duplicate suffixes.
 
 ### Configuration
 
-Connect the provider in OpenCode with `/connect` and enter your CrofAI API key.
-
-For local development, point OpenCode at the built plugin:
-
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["./dist/index.js"]
+  "plugin": [
+    [
+      "opencode-openai-compatible",
+      {
+        "providers": [
+          {
+            "id": "crofai",
+            "name": "CrofAI",
+            "baseURL": "https://crof.ai/v1",
+            "apiKey": "{env:CROFAI_API_KEY}"
+          }
+        ]
+      }
+    ]
+  ]
 }
 ```
 
+The tuple form passes the second element verbatim as the plugin's options. See `README.md` for
+the full options reference.
+
 ### Current Behavior
 
-- Model list fetched from `GET /v1/models`
-- Model cache stored in OpenCode cache under `.cache/crofai-models.json`
-- Provider config hook injects cached or freshly fetched models so custom providers are visible in OpenCode `1.14.31+`
+- Model list fetched from `GET {baseURL}/models` per endpoint
+- Model cache stored in OpenCode cache under `.cache/{id}-models.json` by default
+- All endpoints registered through the `config` hook by populating
+  `outputConfig.provider[endpointId]` (works on OpenCode `1.14.31+`); models are written eagerly
+  (fetched/cached before the provider entry is returned)
+- `provider.models()` runtime hook runs for the PRIMARY endpoint only (backward compatibility
+  for OpenCode `≤1.14.30` and catalog providers)
+- `auth` hook targets the PRIMARY endpoint only; other endpoints use `apiKey` from options
 - Cached models used immediately on startup when available
-- Cache refreshed in background when the provider model hook runs
+- Cache refreshed in background when the primary provider model hook runs
 - Cached models continue to work if the endpoint is unavailable
 - Reasoning-capable models expose `low`, `medium`, and `high` variants
 
-### Model Naming Fix
-
-Models with variant suffixes like `-lightning`, `-precision`, and `-flash` have normalized display names without duplicate suffixes. Example: `kimi-k2.5-lightning` stays `MoonshotAI: Kimi K2.5 (Lightning)` if provider metadata already includes `(Lightning)`.
-
 ### Architecture
 
-- `src/crofai-plugin.ts` - CrofAI-specific wrapper config
-- `src/openai-compatible-plugin.ts` - reusable OpenAI-compatible provider factory
-- `src/index.ts` - package root entrypoint; export only real plugin functions for OpenCode loader compatibility
+- `src/plugin.ts` - multi-endpoint plugin server (`createOpenAICompatibleEndpointsPlugin`) and
+  endpoint/plugin option types
+- `src/openai-compatible-plugin.ts` - shared single-provider factory
+  (`createOpenAICompatiblePlugin`) plus reusable module-level helpers
+  (`readModelCache`/`writeModelCache`/`fetchModels`/`buildModelRegistry`/
+  `buildConfigModelRegistry`/`buildVariantDisplayName`/`createReasoningVariants`)
+- `src/index.ts` - package root entrypoint; exports ONLY the `{ id, server }` plugin module
 - `src/factory.ts` - public factory subpath entrypoint for reusable helper exports
 - `src/logger.ts` - optional debug logger
 
 Package exports:
 
-- `@tretrauit/opencode-crofai` - root plugin entrypoint, exports `CrofAIPlugin` and default only
-- `@tretrauit/opencode-crofai/server` - OpenCode server entrypoint, same dist file as root
-- `@tretrauit/opencode-crofai/factory` - reusable factory/helper entrypoint
+- `opencode-openai-compatible` - root plugin entrypoint, module default export only
+- `opencode-openai-compatible/server` - OpenCode server entrypoint, same dist file as root
+- `opencode-openai-compatible/factory` - reusable factory/helper entrypoint
 
-Factory exports available from `@tretrauit/opencode-crofai/factory`:
+Factory exports available from `opencode-openai-compatible/factory`:
 
 - `createOpenAICompatiblePlugin`
 - `buildVariantDisplayName`
 - `createReasoningVariants`
 - `OpenAICompatibleModel` type
+- `OpenAICompatibleEndpointOptions` / `OpenAICompatibleEndpointAuth` / `OpenAICompatiblePluginOptions` types
 
-Forking another provider should usually mean creating a thin wrapper similar to `src/crofai-plugin.ts` with a different `providerID`, `providerName`, `baseURL`, auth prompt, and cache file name.
+Forking a single provider means using `createOpenAICompatiblePlugin` from
+`src/openai-compatible-plugin.ts` (or the factory subpath) with a fixed
+`providerID`/`providerName`/`baseURL`/auth prompt/cache file.
 
-Do not re-export factory helpers from `src/index.ts`; OpenCode legacy plugin loading enumerates root function exports and may treat helpers as plugins.
+Do not re-export helpers from `src/index.ts`; OpenCode legacy plugin loading enumerates root
+function exports and may treat helpers as plugins, and the module form (`{ id, server }`)
+supersedes legacy enumeration.
 
 ### OpenCode Compatibility Note
 
-OpenCode `1.14.31` loads plugin auth hooks but runs plugin `provider.models()` before config-defined custom providers are added to its provider database. Because CrofAI is not in OpenCode's built-in models database, the plugin must populate `outputConfig.provider.crofai.models` directly in the config hook. Keep package-entry tests and config-model tests when changing exports or provider registration.
+OpenCode `1.14.31` loads plugin auth hooks but runs plugin `provider.models()` before
+config-defined custom providers are added to its provider database. Because configured
+endpoints are not in OpenCode's built-in models database, the plugin must populate
+`outputConfig.provider[id].models` directly in the `config` hook for EVERY endpoint.
+Keep package-entry tests and config-model tests when changing exports or provider registration.
 
 ### Development
 
@@ -145,4 +163,3 @@ Run `bun test` for the test suite located in `tests/`. Build with `bun run build
 ### References
 
 - OpenCode plugin docs: https://opencode.ai/docs/plugins/
-- CrofAI API docs: https://crof.ai/docs (model list, reasoning support)

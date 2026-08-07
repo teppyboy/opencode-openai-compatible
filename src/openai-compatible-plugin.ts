@@ -91,7 +91,29 @@ interface ModelCachePayload {
   models: OpenAICompatibleModel[];
 }
 
-function getOpenCodeCacheDirectory(): string {
+interface ModelRegistryBuildOptions {
+  providerID: string;
+  baseURL: string;
+  npm: string;
+  defaultFamily: string;
+  defaultContextLimit: number;
+  defaultOutputLimit: number;
+  buildDisplayName: (model: OpenAICompatibleModel) => string;
+  getVariants: (model: OpenAICompatibleModel) => Record<string, Record<string, string>> | undefined;
+  logPrefix: string;
+}
+
+interface ConfigModelRegistryBuildOptions {
+  npm: string;
+  baseURL: string;
+  defaultFamily: string;
+  defaultContextLimit: number;
+  defaultOutputLimit: number;
+  buildDisplayName: (model: OpenAICompatibleModel) => string;
+  getVariants: (model: OpenAICompatibleModel) => Record<string, Record<string, string>> | undefined;
+}
+
+export function getOpenCodeCacheDirectory(): string {
   const xdgCacheHome = process.env.XDG_CACHE_HOME;
   if (xdgCacheHome) {
     return join(xdgCacheHome, 'opencode');
@@ -132,6 +154,223 @@ export function createReasoningVariants(
   };
 }
 
+export function readModelCache(
+  cacheFile: string,
+  logPrefix: string
+): OpenAICompatibleModel[] | null {
+  if (!existsSync(cacheFile)) {
+    return null;
+  }
+
+  try {
+    const rawCache = readFileSync(cacheFile, 'utf8');
+    const parsedCache = JSON.parse(rawCache) as Partial<ModelCachePayload>;
+
+    if (!parsedCache.fetchedAt || !Array.isArray(parsedCache.models)) {
+      return null;
+    }
+
+    const fetchedAt = Date.parse(parsedCache.fetchedAt);
+    if (Number.isNaN(fetchedAt)) {
+      return null;
+    }
+
+    return parsedCache.models;
+  } catch (error) {
+    log(
+      `${logPrefix} Failed to read model cache: ${
+        error instanceof Error ? error.toString() : String(error)
+      }`
+    );
+    return null;
+  }
+}
+
+export function writeModelCache(
+  cacheFile: string,
+  models: OpenAICompatibleModel[],
+  logPrefix: string
+): void {
+  try {
+    mkdirSync(dirname(cacheFile), { recursive: true });
+    writeFileSync(
+      cacheFile,
+      JSON.stringify({ fetchedAt: new Date().toISOString(), models }, null, 2),
+      'utf8'
+    );
+  } catch (error) {
+    log(
+      `${logPrefix} Failed to write model cache: ${
+        error instanceof Error ? error.toString() : String(error)
+      }`
+    );
+  }
+}
+
+export async function fetchModels(
+  baseURL: string,
+  apiKey: string,
+  modelEndpointPath: string,
+  fetchTimeoutMs: number,
+  providerName: string
+): Promise<OpenAICompatibleModel[]> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
+
+    const response = await globalThis.fetch(`${baseURL}${modelEndpointPath}`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch ${providerName} models: ${response.status} ${response.statusText}`
+      );
+    }
+
+    const data = (await response.json()) as { data: OpenAICompatibleModel[] };
+    if (!data?.data || !Array.isArray(data.data)) {
+      throw new Error("Invalid response format: missing 'data' array");
+    }
+
+    return data.data;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`${providerName} API request timed out`);
+    }
+
+    throw new Error(
+      `Error fetching ${providerName} models: ${
+        error instanceof Error ? error.toString() : String(error)
+      }`
+    );
+  }
+}
+
+export function buildModelRegistry(
+  models: OpenAICompatibleModel[],
+  opts: ModelRegistryBuildOptions
+): Record<string, any> {
+  const modelRegistry: Record<string, any> = {};
+
+  for (const model of models) {
+    log(`${opts.logPrefix} Processing model: ${model.id}`);
+
+    const inputMods = model.modalities?.input ?? ['text'];
+    const outputMods = model.modalities?.output ?? ['text'];
+    const supportsReasoning = Boolean(model.custom_reasoning || model.reasoning_effort);
+    const variants = opts.getVariants(model);
+
+    log(
+      `${opts.logPrefix} Model ${model.id}: supportsReasoning=${supportsReasoning}, variants=${JSON.stringify(variants)}`
+    );
+
+    modelRegistry[model.id] = {
+      id: model.id,
+      providerID: opts.providerID,
+      api: {
+        id: model.id,
+        url: opts.baseURL,
+        npm: opts.npm,
+      },
+      name: opts.buildDisplayName(model),
+      family: model.family ?? opts.defaultFamily,
+      capabilities: {
+        temperature: true,
+        reasoning: supportsReasoning,
+        attachment: inputMods.includes('image') || inputMods.includes('pdf'),
+        toolcall: model.supports_tool_calls ?? true,
+        input: {
+          text: inputMods.includes('text'),
+          audio: inputMods.includes('audio'),
+          image: inputMods.includes('image'),
+          video: inputMods.includes('video'),
+          pdf: inputMods.includes('pdf'),
+        },
+        output: {
+          text: outputMods.includes('text'),
+          audio: outputMods.includes('audio'),
+          image: outputMods.includes('image'),
+          video: outputMods.includes('video'),
+          pdf: outputMods.includes('pdf'),
+        },
+        interleaved: false,
+      },
+      cost: {
+        input: model.pricing ? parseFloat(model.pricing.prompt) : 0,
+        output: model.pricing ? parseFloat(model.pricing.completion) : 0,
+        cache: {
+          read: model.pricing?.cache_prompt ? parseFloat(model.pricing.cache_prompt) : 0,
+          write: 0,
+        },
+      },
+      limit: {
+        context: model.context_length || opts.defaultContextLimit,
+        output: model.max_completion_tokens || opts.defaultOutputLimit,
+      },
+      status: 'active' as const,
+      options: {},
+      headers: {},
+      release_date: new Date().toISOString(),
+      ...(variants ? { variants } : {}),
+    };
+  }
+
+  return modelRegistry;
+}
+
+export function buildConfigModelRegistry(
+  models: OpenAICompatibleModel[],
+  opts: ConfigModelRegistryBuildOptions
+): Record<string, ConfigProviderModel> {
+  const modelRegistry: Record<string, ConfigProviderModel> = {};
+
+  for (const model of models) {
+    const inputMods = (model.modalities?.input ?? ['text']) as ConfigModelModality[];
+    const outputMods = (model.modalities?.output ?? ['text']) as ConfigModelModality[];
+    const supportsReasoning = Boolean(model.custom_reasoning || model.reasoning_effort);
+    const variants = opts.getVariants(model);
+
+    modelRegistry[model.id] = {
+      id: model.id,
+      name: opts.buildDisplayName(model),
+      family: model.family ?? opts.defaultFamily,
+      reasoning: supportsReasoning,
+      temperature: true,
+      tool_call: model.supports_tool_calls ?? true,
+      cost: {
+        input: model.pricing ? parseFloat(model.pricing.prompt) : 0,
+        output: model.pricing ? parseFloat(model.pricing.completion) : 0,
+        ...(model.pricing?.cache_prompt
+          ? { cache_read: parseFloat(model.pricing.cache_prompt) }
+          : {}),
+      },
+      limit: {
+        context: model.context_length || opts.defaultContextLimit,
+        output: model.max_completion_tokens || opts.defaultOutputLimit,
+      },
+      modalities: {
+        input: inputMods,
+        output: outputMods,
+      },
+      provider: {
+        npm: opts.npm,
+        api: opts.baseURL,
+      },
+      options: {},
+      headers: {},
+      ...(variants ? { variants } : {}),
+    };
+  }
+
+  return modelRegistry;
+}
+
 export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfig): Plugin {
   const providerNpm = config.providerNpm ?? DEFAULT_PROVIDER_NPM;
   const cacheFileName = config.cacheFileName ?? `${config.providerID}-models.json`;
@@ -151,213 +390,23 @@ export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfi
     const cacheFile = join(getOpenCodeCacheDirectory(), '.cache', cacheFileName);
     let modelRefreshPromise: Promise<void> | null = null;
 
-    const readModelCache = (): OpenAICompatibleModel[] | null => {
-      if (!existsSync(cacheFile)) {
-        return null;
-      }
-
-      try {
-        const rawCache = readFileSync(cacheFile, 'utf8');
-        const parsedCache = JSON.parse(rawCache) as Partial<ModelCachePayload>;
-
-        if (!parsedCache.fetchedAt || !Array.isArray(parsedCache.models)) {
-          return null;
-        }
-
-        const fetchedAt = Date.parse(parsedCache.fetchedAt);
-        if (Number.isNaN(fetchedAt)) {
-          return null;
-        }
-
-        return parsedCache.models;
-      } catch (error) {
-        log(
-          `${logPrefix} Failed to read model cache: ${
-            error instanceof Error ? error.toString() : String(error)
-          }`
-        );
-        return null;
-      }
-    };
-
-    const writeModelCache = (models: OpenAICompatibleModel[]) => {
-      try {
-        mkdirSync(dirname(cacheFile), { recursive: true });
-        writeFileSync(
-          cacheFile,
-          JSON.stringify({ fetchedAt: new Date().toISOString(), models }, null, 2),
-          'utf8'
-        );
-      } catch (error) {
-        log(
-          `${logPrefix} Failed to write model cache: ${
-            error instanceof Error ? error.toString() : String(error)
-          }`
-        );
-      }
-    };
-
-    const fetchModels = async (apiKey: string): Promise<OpenAICompatibleModel[]> => {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
-
-        const response = await globalThis.fetch(`${config.baseURL}${modelEndpointPath}`, {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          throw new Error(
-            `Failed to fetch ${config.providerName} models: ${response.status} ${response.statusText}`
-          );
-        }
-
-        const data = (await response.json()) as { data: OpenAICompatibleModel[] };
-        if (!data?.data || !Array.isArray(data.data)) {
-          throw new Error("Invalid response format: missing 'data' array");
-        }
-
-        return data.data;
-      } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') {
-          throw new Error(`${config.providerName} API request timed out`);
-        }
-
-        throw new Error(
-          `Error fetching ${config.providerName} models: ${
-            error instanceof Error ? error.toString() : String(error)
-          }`
-        );
-      }
-    };
-
-    const buildModelRegistry = (models: OpenAICompatibleModel[]) => {
-      const modelRegistry: Record<string, any> = {};
-
-      for (const model of models) {
-        log(`${logPrefix} Processing model: ${model.id}`);
-
-        const inputMods = model.modalities?.input ?? ['text'];
-        const outputMods = model.modalities?.output ?? ['text'];
-        const supportsReasoning = Boolean(model.custom_reasoning || model.reasoning_effort);
-        const variants = getVariants(model);
-
-        log(
-          `${logPrefix} Model ${model.id}: supportsReasoning=${supportsReasoning}, variants=${JSON.stringify(variants)}`
-        );
-
-        modelRegistry[model.id] = {
-          id: model.id,
-          providerID: config.providerID,
-          api: {
-            id: model.id,
-            url: config.baseURL,
-            npm: providerNpm,
-          },
-          name: buildDisplayName(model),
-          family: model.family ?? defaultFamily,
-          capabilities: {
-            temperature: true,
-            reasoning: supportsReasoning,
-            attachment: inputMods.includes('image') || inputMods.includes('pdf'),
-            toolcall: model.supports_tool_calls ?? true,
-            input: {
-              text: inputMods.includes('text'),
-              audio: inputMods.includes('audio'),
-              image: inputMods.includes('image'),
-              video: inputMods.includes('video'),
-              pdf: inputMods.includes('pdf'),
-            },
-            output: {
-              text: outputMods.includes('text'),
-              audio: outputMods.includes('audio'),
-              image: outputMods.includes('image'),
-              video: outputMods.includes('video'),
-              pdf: outputMods.includes('pdf'),
-            },
-            interleaved: false,
-          },
-          cost: {
-            input: model.pricing ? parseFloat(model.pricing.prompt) : 0,
-            output: model.pricing ? parseFloat(model.pricing.completion) : 0,
-            cache: {
-              read: model.pricing?.cache_prompt ? parseFloat(model.pricing.cache_prompt) : 0,
-              write: 0,
-            },
-          },
-          limit: {
-            context: model.context_length || defaultContextLimit,
-            output: model.max_completion_tokens || defaultOutputLimit,
-          },
-          status: 'active' as const,
-          options: {},
-          headers: {},
-          release_date: new Date().toISOString(),
-          ...(variants ? { variants } : {}),
-        };
-      }
-
-      return modelRegistry;
-    };
-
-    const buildConfigModelRegistry = (models: OpenAICompatibleModel[]) => {
-      const modelRegistry: Record<string, ConfigProviderModel> = {};
-
-      for (const model of models) {
-        const inputMods = (model.modalities?.input ?? ['text']) as ConfigModelModality[];
-        const outputMods = (model.modalities?.output ?? ['text']) as ConfigModelModality[];
-        const supportsReasoning = Boolean(model.custom_reasoning || model.reasoning_effort);
-        const variants = getVariants(model);
-
-        modelRegistry[model.id] = {
-          id: model.id,
-          name: buildDisplayName(model),
-          family: model.family ?? defaultFamily,
-          reasoning: supportsReasoning,
-          temperature: true,
-          tool_call: model.supports_tool_calls ?? true,
-          cost: {
-            input: model.pricing ? parseFloat(model.pricing.prompt) : 0,
-            output: model.pricing ? parseFloat(model.pricing.completion) : 0,
-            ...(model.pricing?.cache_prompt
-              ? { cache_read: parseFloat(model.pricing.cache_prompt) }
-              : {}),
-          },
-          limit: {
-            context: model.context_length || defaultContextLimit,
-            output: model.max_completion_tokens || defaultOutputLimit,
-          },
-          modalities: {
-            input: inputMods,
-            output: outputMods,
-          },
-          provider: {
-            npm: providerNpm,
-            api: config.baseURL,
-          },
-          options: {},
-          headers: {},
-          ...(variants ? { variants } : {}),
-        };
-      }
-
-      return modelRegistry;
+    const fetchAndCacheModels = async (apiKey: string) => {
+      const fetchedModels = await fetchModels(
+        config.baseURL,
+        apiKey,
+        modelEndpointPath,
+        fetchTimeoutMs,
+        config.providerName
+      );
+      writeModelCache(cacheFile, fetchedModels, logPrefix);
+      return fetchedModels;
     };
 
     return {
       config: async (outputConfig: any) => {
         log(`${logPrefix} Config hook called - registering provider`);
-        const cachedModels = readModelCache();
-        const models = cachedModels ?? (await fetchModels(''));
-
-        if (!cachedModels) {
-          writeModelCache(models);
-        }
+        const cachedModels = readModelCache(cacheFile, logPrefix);
+        const models = cachedModels ?? (await fetchAndCacheModels(''));
 
         outputConfig.provider = outputConfig.provider || {};
         outputConfig.provider[config.providerID] = {
@@ -366,7 +415,15 @@ export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfi
           options: {
             baseURL: config.baseURL,
           },
-          models: buildConfigModelRegistry(models),
+          models: buildConfigModelRegistry(models, {
+            npm: providerNpm,
+            baseURL: config.baseURL,
+            defaultFamily,
+            defaultContextLimit,
+            defaultOutputLimit,
+            buildDisplayName,
+            getVariants,
+          }),
         };
         log(`${logPrefix} Provider registered in config with ${models.length} models`);
       },
@@ -381,18 +438,12 @@ export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfi
             log(`${logPrefix} No auth found, skipping model registration`);
           }
 
-          const fetchAndCacheModels = async () => {
-            const fetchedModels = await fetchModels(apiKey);
-            writeModelCache(fetchedModels);
-            return fetchedModels;
-          };
-
           const refreshModelsInBackground = () => {
             if (modelRefreshPromise) {
               return;
             }
 
-            modelRefreshPromise = fetchAndCacheModels()
+            modelRefreshPromise = fetchAndCacheModels(apiKey)
               .then((fetchedModels) => {
                 log(`${logPrefix} Refreshed cached model list (${fetchedModels.length} models)`);
               })
@@ -408,17 +459,27 @@ export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfi
               });
           };
 
-          const cachedModels = readModelCache();
+          const cachedModels = readModelCache(cacheFile, logPrefix);
           const models = cachedModels
             ? (() => {
                 log(`${logPrefix} Using cached model list (${cachedModels.length} models)`);
                 refreshModelsInBackground();
                 return cachedModels;
               })()
-            : await fetchAndCacheModels();
+            : await fetchAndCacheModels(apiKey);
 
           log(`${logPrefix} Retrieved ${models.length} available ${config.providerName} models`);
-          const modelRegistry = buildModelRegistry(models);
+          const modelRegistry = buildModelRegistry(models, {
+            providerID: config.providerID,
+            baseURL: config.baseURL,
+            npm: providerNpm,
+            defaultFamily,
+            defaultContextLimit,
+            defaultOutputLimit,
+            buildDisplayName,
+            getVariants,
+            logPrefix,
+          });
           log(
             `${logPrefix} Model registry created with ${Object.keys(modelRegistry).length} models`
           );

@@ -4,11 +4,12 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 describe('package entrypoints', () => {
-  it('exports only plugin functions from the package root', async () => {
+  it('exports only the plugin module from the package root', async () => {
     const mod = await import('../src/index.ts');
 
-    expect(Object.keys(mod).sort()).toEqual(['CrofAIPlugin', 'default']);
-    expect(mod.default).toBe(mod.CrofAIPlugin);
+    expect(Object.keys(mod).sort()).toEqual(['default']);
+    expect(mod.default.id).toBe('opencode-openai-compatible');
+    expect(typeof mod.default.server).toBe('function');
   });
 
   it('exports reusable helpers from the factory subpath', async () => {
