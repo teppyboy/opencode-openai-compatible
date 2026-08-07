@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
@@ -8,6 +8,8 @@ vi.mock('../src/logger.ts', () => ({
   log: vi.fn(),
   initLogger: vi.fn().mockResolvedValue(undefined),
 }));
+
+const originalFetch = globalThis.fetch;
 
 const crofaiEndpoint = {
   id: 'crofai',
@@ -144,6 +146,10 @@ describe('opencode-openai-compatible plugin', () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   it('registers multiple endpoints into config', async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -196,6 +202,8 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('does nothing when no providers are configured', async () => {
+    globalThis.fetch = vi.fn();
+
     const { input, cleanup } = createPluginContext();
 
     try {
@@ -324,6 +332,7 @@ describe('opencode-openai-compatible plugin', () => {
             env: 'custom-env',
             models: {
               'explicit-model': { id: 'explicit-model' },
+              'kimi-k2.5': { name: 'User Override' },
             },
           },
         },
@@ -339,8 +348,12 @@ describe('opencode-openai-compatible plugin', () => {
       expect(cfg.provider.crofai.env).toBe('custom-env');
       expect(cfg.provider.crofai.models['explicit-model']).toBeDefined();
 
-      // Discovered models merged in
-      expect(cfg.provider.crofai.models['kimi-k2.5']).toBeDefined();
+      // User models win over discovered same-id models
+      expect(cfg.provider.crofai.models['kimi-k2.5'].name).toBe('User Override');
+
+      // Non-colliding discovered models still merged in
+      expect(cfg.provider.crofai.models['glm-5']).toBeDefined();
+      expect(cfg.provider.crofai.models['glm-5'].name).toBe('Z.ai: GLM 5');
     } finally {
       cleanup();
     }
@@ -782,6 +795,282 @@ describe('opencode-openai-compatible plugin', () => {
       expect(models['kimi-k2.5'].api.url).toBe('https://crof.ai/v1');
       expect(models['kimi-k2.5'].providerID).toBe('crofai');
       expect(existsSync(cachePathFor('crofai'))).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does nothing when all providers are invalid', async () => {
+    globalThis.fetch = vi.fn();
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [
+          { name: 'NoId', baseURL: 'https://noid.example/v1' },
+          { id: 'nobase', name: 'NoBase' },
+        ],
+      });
+
+      expect(plugin).toEqual({});
+
+      const cfg: any = {};
+      await plugin.config?.(cfg);
+      expect(cfg.provider).toBeUndefined();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('skips endpoints missing an id', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [{ name: 'NoId', baseURL: 'https://noid.example/v1' }, groqEndpoint],
+      });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      expect(cfg.provider.groq).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('skips endpoints missing a name', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [{ id: 'noname', baseURL: 'https://noname.example/v1' }, groqEndpoint],
+      });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      expect(cfg.provider.noname).toBeUndefined();
+      expect(cfg.provider.groq).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('registers other endpoints when one endpoint fails to fetch models', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [{ id: 'down', name: 'Down', baseURL: 'https://down.example/v1' }, groqEndpoint],
+      });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      // Failed endpoint still registered with empty models, does not block the next one
+      expect(cfg.provider.down).toBeDefined();
+      expect(cfg.provider.down.models).toEqual({});
+      expect(cfg.provider.groq).toBeDefined();
+      expect(cfg.provider.groq.models['kimi-k2.5']).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('falls back to the first provider when primary references an unknown id', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [groqEndpoint, crofaiEndpoint],
+        primary: 'ghost',
+      });
+
+      expect(plugin.provider.id).toBe('groq');
+      expect(plugin.auth.provider).toBe('groq');
+
+      const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
+      const models = await plugin.provider.models({} as any, ctx);
+
+      expect(models['kimi-k2.5'].api.url).toBe('https://api.groq.com/openai/v1');
+      expect(models['kimi-k2.5'].providerID).toBe('groq');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('injects endpoint headers into provider options', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [
+          {
+            id: 'hdr',
+            name: 'HDR',
+            baseURL: 'https://hdr.example/v1',
+            headers: { 'X-Custom': 'yes' },
+          },
+        ],
+      });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      expect(cfg.provider.hdr.options.headers).toEqual({ 'X-Custom': 'yes' });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('rejects when the model fetch exceeds fetchTimeoutMs', async () => {
+    globalThis.fetch = vi.fn(
+      (
+        _url: string,
+        init: { signal?: { addEventListener: (type: 'abort', cb: () => void) => void } } | undefined
+      ) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const abortError = new Error('The operation was aborted.');
+            abortError.name = 'AbortError';
+            reject(abortError);
+          });
+        });
+      }
+    );
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [crofaiEndpoint],
+        fetchTimeoutMs: 60,
+      });
+
+      const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
+      await expect(plugin.provider.models({} as any, ctx)).rejects.toThrow(
+        'CrofAI API request timed out'
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('skips endpoints with reserved ids', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, {
+        providers: [
+          { id: '__proto__', name: 'Evil', baseURL: 'https://evil.example/v1' },
+          { id: 'constructor', name: 'Evil', baseURL: 'https://evil.example/v1' },
+          groqEndpoint,
+        ],
+      });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      expect(Object.prototype.hasOwnProperty.call(cfg.provider, '__proto__')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(cfg.provider, 'constructor')).toBe(false);
+      expect(cfg.provider.groq).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('skips reserved model ids returned by the models endpoint', async () => {
+    const modelsWithReserved = [
+      ...mockModels,
+      { id: '__proto__', name: 'Evil' },
+      { id: 'constructor', name: 'Evil' },
+    ];
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: modelsWithReserved }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+      const cfg: any = {};
+      await plugin.config(cfg);
+
+      expect(Object.prototype.hasOwnProperty.call(cfg.provider.crofai.models, '__proto__')).toBe(
+        false
+      );
+      expect(Object.prototype.hasOwnProperty.call(cfg.provider.crofai.models, 'constructor')).toBe(
+        false
+      );
+      expect(cfg.provider.crofai.models['kimi-k2.5']).toBeDefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('single-flights concurrent provider.models calls without a cache', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: mockModels }),
+    });
+
+    const { input, cleanup } = createPluginContext();
+
+    try {
+      const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+      const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
+      const [first, second] = await Promise.all([
+        plugin.provider.models({} as any, ctx),
+        plugin.provider.models({} as any, ctx),
+      ]);
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(first['kimi-k2.5'].name).toBe('MoonshotAI: Kimi K2.5');
+      expect(second['kimi-k2.5'].name).toBe('MoonshotAI: Kimi K2.5');
     } finally {
       cleanup();
     }

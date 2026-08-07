@@ -125,6 +125,8 @@ the full options reference.
 - `src/index.ts` - package root entrypoint; exports ONLY the `{ id, server }` plugin module
 - `src/factory.ts` - public factory subpath entrypoint for reusable helper exports
 - `src/logger.ts` - optional debug logger
+- The factory (`src/openai-compatible-plugin.ts`) intentionally retains a log-only `chat.params`
+  hook for fork back-compat; the multi-endpoint plugin (`src/plugin.ts`) omits it.
 
 Package exports:
 

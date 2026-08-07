@@ -214,18 +214,16 @@ export async function fetchModels(
   fetchTimeoutMs: number,
   providerName: string
 ): Promise<OpenAICompatibleModel[]> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
 
+  try {
     const response = await globalThis.fetch(`${baseURL}${modelEndpointPath}`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
       signal: controller.signal,
     });
-
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(
@@ -249,6 +247,8 @@ export async function fetchModels(
         error instanceof Error ? error.toString() : String(error)
       }`
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -259,6 +259,11 @@ export function buildModelRegistry(
   const modelRegistry: Record<string, any> = {};
 
   for (const model of models) {
+    if (model.id === '__proto__' || model.id === 'constructor') {
+      log(`${opts.logPrefix} [ERROR] Skipping model with reserved id ${model.id}`);
+      continue;
+    }
+
     log(`${opts.logPrefix} Processing model: ${model.id}`);
 
     const inputMods = model.modalities?.input ?? ['text'];
@@ -331,6 +336,11 @@ export function buildConfigModelRegistry(
   const modelRegistry: Record<string, ConfigProviderModel> = {};
 
   for (const model of models) {
+    if (model.id === '__proto__' || model.id === 'constructor') {
+      log(`${opts.logPrefix} [ERROR] Skipping model with reserved id ${model.id}`);
+      continue;
+    }
+
     const inputMods = (model.modalities?.input ?? ['text']) as ConfigModelModality[];
     const outputMods = (model.modalities?.output ?? ['text']) as ConfigModelModality[];
     const supportsReasoning = Boolean(model.custom_reasoning || model.reasoning_effort);
@@ -423,6 +433,7 @@ export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfi
             defaultOutputLimit,
             buildDisplayName,
             getVariants,
+            logPrefix,
           }),
         };
         log(`${logPrefix} Provider registered in config with ${models.length} models`);

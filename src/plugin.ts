@@ -1,6 +1,7 @@
 import type { Hooks } from '@opencode-ai/plugin';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { log, initLogger } from './logger.js';
+import type { OpenAICompatibleModel } from './openai-compatible-plugin.js';
 import {
   buildConfigModelRegistry,
   buildModelRegistry,
@@ -68,8 +69,13 @@ interface ResolvedEndpoint {
 // Module-scoped background refresh promises, keyed per primary provider id
 const modelRefreshPromises = new Map<string, Promise<void> | null>();
 
+// Module-scoped in-flight model fetch promises, keyed per provider id (single-flight)
+const modelFetchPromises = new Map<string, Promise<OpenAICompatibleModel[]> | null>();
+
 function resolveEndpoint(endpoint: OpenAICompatibleEndpointOptions): ResolvedEndpoint {
-  const cacheFile = endpoint.cacheFile ?? `${endpoint.id}-models.json`;
+  const cacheFile = endpoint.cacheFile
+    ? basename(endpoint.cacheFile)
+    : `${endpoint.id}-models.json`;
   const cachePath = join(getOpenCodeCacheDirectory(), '.cache', cacheFile);
 
   return {
@@ -114,6 +120,10 @@ export async function createOpenAICompatibleEndpointsPlugin(
       log(`[${PLUGIN_NAME} Plugin] [ERROR] Skipping provider with missing id`);
       continue;
     }
+    if (endpoint.id === '__proto__' || endpoint.id === 'constructor') {
+      log(`[${PLUGIN_NAME} Plugin] [ERROR] Skipping provider with reserved id ${endpoint.id}`);
+      continue;
+    }
     if (typeof endpoint.name !== 'string' || endpoint.name.trim() === '') {
       log(`[${PLUGIN_NAME} Plugin] [ERROR] Skipping provider ${endpoint.id}: missing name`);
       continue;
@@ -131,6 +141,11 @@ export async function createOpenAICompatibleEndpointsPlugin(
     providers.push(resolveEndpoint(endpoint));
   }
 
+  if (providers.length === 0) {
+    log(`[${PLUGIN_NAME} Plugin] No valid providers configured; plugin inactive`);
+    return {};
+  }
+
   const primaryId = options?.primary ?? providers[0]?.id;
   const primary = providers.find((endpoint) => endpoint.id === primaryId) ?? providers[0];
   if (primary.id !== primaryId) {
@@ -144,19 +159,28 @@ export async function createOpenAICompatibleEndpointsPlugin(
   return {
     config: async (outputConfig: any) => {
       for (const endpoint of providers) {
-        const cachedModels = readModelCache(endpoint.cachePath, endpoint.logPrefix);
-        const models =
-          cachedModels ??
-          (await fetchModels(
-            endpoint.baseURL,
-            '',
-            endpoint.modelEndpoint,
-            fetchTimeoutMs,
-            endpoint.name
-          ));
+        let models: OpenAICompatibleModel[] = [];
+        try {
+          const cachedModels = readModelCache(endpoint.cachePath, endpoint.logPrefix);
+          models =
+            cachedModels ??
+            (await fetchModels(
+              endpoint.baseURL,
+              '',
+              endpoint.modelEndpoint,
+              fetchTimeoutMs,
+              endpoint.name
+            ));
 
-        if (!cachedModels) {
-          writeModelCache(endpoint.cachePath, models, endpoint.logPrefix);
+          if (!cachedModels) {
+            writeModelCache(endpoint.cachePath, models, endpoint.logPrefix);
+          }
+        } catch (error) {
+          log(
+            `${endpoint.logPrefix} [ERROR] ${endpoint.name} failed: ${
+              error instanceof Error ? error.toString() : String(error)
+            }`
+          );
         }
 
         outputConfig.provider = outputConfig.provider || {};
@@ -169,6 +193,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
           defaultOutputLimit: endpoint.outputLimit,
           buildDisplayName: buildVariantDisplayName,
           getVariants: createReasoningVariants,
+          logPrefix: endpoint.logPrefix,
         });
 
         outputConfig.provider[endpoint.id] = {
@@ -176,6 +201,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
           npm: endpoint.npm,
           name: endpoint.name,
           options: {
+            ...(existing.options ?? {}),
             baseURL: endpoint.baseURL,
             ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
             ...(endpoint.headers && Object.keys(endpoint.headers).length > 0
@@ -183,12 +209,12 @@ export async function createOpenAICompatibleEndpointsPlugin(
               : {}),
           },
           models: {
-            ...(existing.models ?? {}),
             ...registry,
+            ...(existing.models ?? {}),
           },
         };
         log(
-          `${endpoint.logPrefix} Provider ${endpoint.id} registered in config with ${models.length} models`
+          `${endpoint.logPrefix} Provider ${endpoint.id} registered in config with ${Object.keys(registry).length} discovered models`
         );
       }
     },
@@ -213,6 +239,19 @@ export async function createOpenAICompatibleEndpointsPlugin(
           );
           writeModelCache(primary.cachePath, fetchedModels, primary.logPrefix);
           return fetchedModels;
+        };
+
+        const fetchAndCacheModelsSingleFlight = () => {
+          const pendingFetch = modelFetchPromises.get(primary.id) ?? null;
+          if (pendingFetch) {
+            return pendingFetch;
+          }
+
+          const fetchPromise = fetchAndCacheModels().finally(() => {
+            modelFetchPromises.set(primary.id, null);
+          });
+          modelFetchPromises.set(primary.id, fetchPromise);
+          return fetchPromise;
         };
 
         const refreshModelsInBackground = () => {
@@ -248,7 +287,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
               refreshModelsInBackground();
               return cachedModels;
             })()
-          : await fetchAndCacheModels();
+          : await fetchAndCacheModelsSingleFlight();
 
         log(`${primary.logPrefix} Retrieved ${models.length} available ${primary.name} models`);
         const modelRegistry = buildModelRegistry(models, {

@@ -2,7 +2,6 @@ import { appendFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// Determine log directory based on platform
 const getLogDir = (): string => {
   return join(homedir(), '.local', 'share', 'opencode', 'log', 'opencode-openai-compatible');
 };
