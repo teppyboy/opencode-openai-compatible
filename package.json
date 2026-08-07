@@ -1,6 +1,6 @@
 {
   "name": "@tretrauit/opencode-openai-compatible",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Registers one or more configurable OpenAI-compatible endpoints as OpenCode providers.",
   "author": {
     "name": "tretrauit",
