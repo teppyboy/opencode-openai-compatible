@@ -37,8 +37,9 @@ Add the plugin as a bare entry — no options tuple needed:
 ```
 
 Endpoint configuration is loaded from a **separate config file** named
-`opencode-openai-compatible.json` in the same directory as your `opencode.json` (the project
-root):
+`opencode-openai-compatible.json`. Put it next to your global `opencode.json` (usually
+`~/.config/opencode/`) to configure endpoints for every project, or in a project directory to
+configure that project only:
 
 ```json
 {
@@ -68,17 +69,50 @@ below.
 
 #### Config file resolution
 
-The plugin looks for endpoint configuration in this order:
+Every candidate below is checked as `.json` first, then `.jsonc`. The first file that exists,
+is readable, and parses wins. Duplicate paths are only checked once.
 
 1. `OPENCODE_OPENAI_COMPATIBLE_CONFIG` environment variable — an explicit path to the config
    file. The path may be absolute or relative to the current working directory; on Windows use
-   the native path (e.g. `C:\Users\you\.config\opencode-openai-compatible.json`) or forward
-   slashes. If the file is missing or malformed, the plugin logs `[ERROR]` and moves on to the
-   next source.
-2. `opencode-openai-compatible.json` next to your `opencode.json` (the plugin's project
-   directory).
-3. Legacy plugin options (the tuple form below) — still supported as a fallback when no config
-   file exists.
+   the native path (e.g. `C:\Users\you\.config\opencode\opencode-openai-compatible.json`) or
+   forward slashes. If the file is missing or malformed, the plugin logs `[ERROR]` and moves on
+   to the next candidate.
+2. `<project directory>/opencode-openai-compatible.json`
+3. `<project directory>/.opencode/opencode-openai-compatible.json`
+4. `<worktree>/opencode-openai-compatible.json` (when the worktree differs from the project
+   directory)
+5. `<worktree>/.opencode/opencode-openai-compatible.json`
+6. `$OPENCODE_CONFIG_DIR/opencode-openai-compatible.json` (when the variable is set)
+7. `$XDG_CONFIG_HOME/opencode/opencode-openai-compatible.json` (when the variable is set)
+8. `~/.config/opencode/opencode-openai-compatible.json` — **the global config location**
+9. `%APPDATA%\opencode\opencode-openai-compatible.json` (Windows, when set)
+10. `%LOCALAPPDATA%\opencode\opencode-openai-compatible.json` (Windows, when set)
+11. Legacy plugin options (the tuple form below) — used only after every candidate above misses.
+
+When no config file is found, the plugin logs the full list of attempted paths, which is the
+fastest way to see where it expected your file.
+
+#### JSONC tolerance
+
+The plugin config file is parsed leniently. `//` line comments, `/* */` block comments, and
+trailing commas are all accepted in both `.json` and `.jsonc` files:
+
+```jsonc
+{
+  // Primary endpoint gets the /connect auth flow
+  "primary": "crofai",
+  "providers": [
+    {
+      "id": "crofai",
+      "name": "CrofAI",
+      "baseURL": "https://crof.ai/v1", // URLs inside strings are never treated as comments
+    },
+  ],
+}
+```
+
+This tolerance applies **only** to this plugin's config file. The model cache is still parsed as
+strict JSON.
 
 #### Legacy tuple options
 

@@ -76,8 +76,8 @@ without duplicate suffixes.
 
 ### Configuration
 
-Endpoints are configured in a separate `opencode-openai-compatible.json` file next to
-`opencode.json` (the plugin's project directory):
+Endpoints are configured in a separate `opencode-openai-compatible.json` file, either next to
+the global `opencode.json` (usually `~/.config/opencode/`) or in a project directory:
 
 ```json
 {
@@ -93,16 +93,34 @@ Endpoints are configured in a separate `opencode-openai-compatible.json` file ne
 }
 ```
 
-Resolution order: `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var (explicit path) →
-`opencode-openai-compatible.json` in the project directory → legacy `opencode.json` plugin
-options tuple (still supported as fallback). The file schema is identical to the options
-object. See `README.md` for the full options reference.
+Resolution order (each candidate is checked as `.json`, then `.jsonc`; first existing, readable,
+parseable file wins; duplicates deduplicated):
+
+1. `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var (explicit path)
+2. `<input.directory>/opencode-openai-compatible.json`
+3. `<input.directory>/.opencode/opencode-openai-compatible.json`
+4. `<input.worktree>/opencode-openai-compatible.json` (if distinct)
+5. `<input.worktree>/.opencode/opencode-openai-compatible.json` (if distinct)
+6. `$OPENCODE_CONFIG_DIR/opencode-openai-compatible.json` (if set)
+7. `$XDG_CONFIG_HOME/opencode/opencode-openai-compatible.json` (if set)
+8. `homedir()/.config/opencode/opencode-openai-compatible.json`
+9. `%APPDATA%\opencode\...` and `%LOCALAPPDATA%\opencode\...` (if set)
+10. legacy `opencode.json` plugin options tuple (fallback)
+
+The file schema is identical to the options object. See `README.md` for the full options
+reference.
 
 ### Current Behavior
 
-- Endpoint config loaded from `opencode-openai-compatible.json` in the project directory, or
-  from an explicit file path via the `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var; the
-  `opencode.json` plugin options tuple remains a fallback when no config file exists
+- Endpoint config loaded from `opencode-openai-compatible.json` (or `.jsonc`) found in the
+  project directory, project/worktree `.opencode/` subdirectories, or the global OpenCode config
+  directory, or from an explicit file path via the `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var;
+  the `opencode.json` plugin options tuple remains a fallback when no config file exists
+- Plugin config parsing is JSONC-tolerant: `//` comments, `/* */` comments, and trailing commas
+  are stripped by a character scanner that preserves comment-looking text inside JSON strings
+  (e.g. `https://...`). The model cache parser is strict JSON and must stay that way
+- When no config file resolves, all attempted candidate paths are logged, followed by the
+  existing "plugin inactive" warning
 - Model list fetched from `GET {baseURL}/models` per endpoint
 - Model cache stored in OpenCode cache under `.cache/{id}-models.json` by default
 - All endpoints registered through the `config` hook by populating

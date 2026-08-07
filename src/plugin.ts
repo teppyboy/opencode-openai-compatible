@@ -1,6 +1,7 @@
 import type { Hooks } from '@opencode-ai/plugin';
 import { existsSync, readFileSync } from 'fs';
-import { basename, join } from 'path';
+import { homedir } from 'os';
+import { basename, join, resolve } from 'path';
 import { log, initLogger } from './logger.js';
 import type { OpenAICompatibleModel } from './openai-compatible-plugin.js';
 import {
@@ -15,7 +16,12 @@ import {
 } from './openai-compatible-plugin.js';
 
 const PLUGIN_NAME = 'opencode-openai-compatible';
-const CONFIG_FILE_NAME = 'opencode-openai-compatible.json';
+const CONFIG_FILE_NAMES = [
+  'opencode-openai-compatible.json',
+  'opencode-openai-compatible.jsonc',
+] as const;
+const OPENCODE_CONFIG_DIR_NAME = 'opencode';
+const OPENCODE_PROJECT_DIR_NAME = '.opencode';
 const CONFIG_PATH_ENV_VAR = 'OPENCODE_OPENAI_COMPATIBLE_CONFIG';
 const DEFAULT_PROVIDER_NPM = '@ai-sdk/openai-compatible';
 const DEFAULT_MODEL_ENDPOINT = '/models';
@@ -51,10 +57,131 @@ export interface OpenAICompatiblePluginOptions {
   fetchTimeoutMs?: number;
 }
 
+function findNextMeaningfulIndex(jsonText: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < jsonText.length && /\s/.test(jsonText[index])) {
+    index += 1;
+  }
+  return index;
+}
+
+function stripJsonComments(rawConfig: string): string {
+  let result = '';
+  let index = 0;
+  let insideString = false;
+
+  while (index < rawConfig.length) {
+    const char = rawConfig[index];
+    const nextChar = rawConfig[index + 1];
+
+    if (insideString) {
+      result += char;
+      if (char === '\\') {
+        result += nextChar ?? '';
+        index += 2;
+        continue;
+      }
+      if (char === '"') {
+        insideString = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      insideString = true;
+      result += char;
+      index += 1;
+      continue;
+    }
+
+    if (char === '/' && nextChar === '/') {
+      while (index < rawConfig.length && rawConfig[index] !== '\n') {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === '/' && nextChar === '*') {
+      index += 2;
+      while (
+        index < rawConfig.length &&
+        !(rawConfig[index] === '*' && rawConfig[index + 1] === '/')
+      ) {
+        index += 1;
+      }
+      index += 2;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
+function stripTrailingCommas(jsonText: string): string {
+  let result = '';
+  let index = 0;
+  let insideString = false;
+
+  while (index < jsonText.length) {
+    const char = jsonText[index];
+
+    if (insideString) {
+      result += char;
+      if (char === '\\') {
+        result += jsonText[index + 1] ?? '';
+        index += 2;
+        continue;
+      }
+      if (char === '"') {
+        insideString = false;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      insideString = true;
+      result += char;
+      index += 1;
+      continue;
+    }
+
+    if (char === ',') {
+      const nextMeaningful = jsonText[findNextMeaningfulIndex(jsonText, index + 1)];
+      if (nextMeaningful === '}' || nextMeaningful === ']') {
+        index += 1;
+        continue;
+      }
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
+function parseTolerantJson(rawConfig: string): unknown {
+  return JSON.parse(stripTrailingCommas(stripJsonComments(rawConfig)));
+}
+
 function readPluginConfigFile(configPath: string): OpenAICompatiblePluginOptions | null {
   try {
     const rawConfig = readFileSync(configPath, 'utf8');
-    return JSON.parse(rawConfig) as OpenAICompatiblePluginOptions;
+    const parsedConfig = parseTolerantJson(rawConfig);
+
+    if (parsedConfig === null || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+      log(
+        `[${PLUGIN_NAME} Plugin] [ERROR] Failed to read plugin config from ${configPath}: expected a JSON object`
+      );
+      return null;
+    }
+
+    return parsedConfig as OpenAICompatiblePluginOptions;
   } catch (error) {
     log(
       `[${PLUGIN_NAME} Plugin] [ERROR] Failed to read plugin config from ${configPath}: ${
@@ -65,27 +192,76 @@ function readPluginConfigFile(configPath: string): OpenAICompatiblePluginOptions
   }
 }
 
+function buildConfigSearchDirectories(input: any): string[] {
+  const directories: (string | undefined)[] = [
+    input?.directory,
+    input?.directory ? join(input.directory, OPENCODE_PROJECT_DIR_NAME) : undefined,
+    input?.worktree,
+    input?.worktree ? join(input.worktree, OPENCODE_PROJECT_DIR_NAME) : undefined,
+    process.env.OPENCODE_CONFIG_DIR,
+    process.env.XDG_CONFIG_HOME
+      ? join(process.env.XDG_CONFIG_HOME, OPENCODE_CONFIG_DIR_NAME)
+      : undefined,
+    join(homedir(), '.config', OPENCODE_CONFIG_DIR_NAME),
+    process.env.APPDATA ? join(process.env.APPDATA, OPENCODE_CONFIG_DIR_NAME) : undefined,
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, OPENCODE_CONFIG_DIR_NAME) : undefined,
+  ];
+
+  return directories.filter(
+    (directory): directory is string => typeof directory === 'string' && directory.trim() !== ''
+  );
+}
+
+function buildConfigCandidatePaths(input: any): string[] {
+  const candidatePaths: string[] = [];
+  const seenPaths = new Set<string>();
+
+  for (const directory of buildConfigSearchDirectories(input)) {
+    for (const fileName of CONFIG_FILE_NAMES) {
+      const candidatePath = resolve(join(directory, fileName));
+      const dedupeKey = process.platform === 'win32' ? candidatePath.toLowerCase() : candidatePath;
+
+      if (seenPaths.has(dedupeKey)) {
+        continue;
+      }
+
+      seenPaths.add(dedupeKey);
+      candidatePaths.push(candidatePath);
+    }
+  }
+
+  return candidatePaths;
+}
+
 function resolvePluginConfig(
   input: any,
   options?: OpenAICompatiblePluginOptions
 ): OpenAICompatiblePluginOptions | null {
   const envConfigPath = process.env[CONFIG_PATH_ENV_VAR];
   if (envConfigPath) {
-    const envConfig = readPluginConfigFile(envConfigPath);
+    const envConfig = readPluginConfigFile(resolve(envConfigPath));
     if (envConfig) {
-      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${envConfigPath}`);
+      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${resolve(envConfigPath)}`);
       return envConfig;
     }
   }
 
-  const projectConfigPath = input?.directory ? join(input.directory, CONFIG_FILE_NAME) : null;
-  if (projectConfigPath && existsSync(projectConfigPath)) {
-    const projectConfig = readPluginConfigFile(projectConfigPath);
-    if (projectConfig) {
-      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${projectConfigPath}`);
-      return projectConfig;
+  const candidatePaths = buildConfigCandidatePaths(input);
+  for (const candidatePath of candidatePaths) {
+    if (!existsSync(candidatePath)) {
+      continue;
+    }
+
+    const fileConfig = readPluginConfigFile(candidatePath);
+    if (fileConfig) {
+      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${candidatePath}`);
+      return fileConfig;
     }
   }
+
+  log(
+    `[${PLUGIN_NAME} Plugin] No usable config file found. Attempted paths: ${candidatePaths.join(', ')}`
+  );
 
   if (options?.providers && options.providers.length > 0) {
     log(`[${PLUGIN_NAME} Plugin] No config file found; using plugin options`);

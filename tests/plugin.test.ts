@@ -99,9 +99,33 @@ describe('opencode-openai-compatible plugin', () => {
   const createPluginContext = () => {
     const testDir = mkdtempSync(join(tmpdir(), 'opencode-openai-compatible-test-'));
     const cacheHome = join(testDir, 'cache-home');
-    const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+    const homeDir = join(testDir, 'home');
+    const globalConfigDir = join(homeDir, '.config', 'opencode');
 
-    process.env.XDG_CACHE_HOME = cacheHome;
+    // Sandbox every directory the config resolver probes so a real user config on the
+    // machine running the suite can never leak into a test.
+    const envOverrides: Record<string, string | undefined> = {
+      XDG_CACHE_HOME: cacheHome,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      XDG_CONFIG_HOME: join(homeDir, '.config'),
+      APPDATA: join(homeDir, 'AppData', 'Roaming'),
+      LOCALAPPDATA: join(homeDir, 'AppData', 'Local'),
+      OPENCODE_CONFIG_DIR: undefined,
+      OPENCODE_OPENAI_COMPATIBLE_CONFIG: undefined,
+    };
+
+    const previousEnv: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(envOverrides)) {
+      previousEnv[key] = process.env[key];
+      if (value === undefined) {
+        delete process.env[key];
+        continue;
+      }
+      process.env[key] = value;
+    }
+
+    mkdirSync(globalConfigDir, { recursive: true });
 
     return {
       input: {
@@ -113,12 +137,16 @@ describe('opencode-openai-compatible plugin', () => {
       },
       testDir,
       cacheHome,
+      homeDir,
+      globalConfigDir,
       cachePathFor: (id: string) => join(cacheHome, 'opencode', '.cache', `${id}-models.json`),
       cleanup: () => {
-        if (previousXdgCacheHome === undefined) {
-          delete process.env.XDG_CACHE_HOME;
-        } else {
-          process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+        for (const [key, value] of Object.entries(previousEnv)) {
+          if (value === undefined) {
+            delete process.env[key];
+            continue;
+          }
+          process.env[key] = value;
         }
 
         rmSync(testDir, { recursive: true, force: true });
@@ -1307,6 +1335,343 @@ describe('opencode-openai-compatible plugin', () => {
         } else {
           process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = previousEnv;
         }
+        cleanup();
+      }
+    });
+
+    it('loads endpoints from the global opencode config directory', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, globalConfigDir } = createPluginContext();
+
+      try {
+        const globalConfigPath = join(globalConfigDir, configFileName);
+        writeFileSync(globalConfigPath, JSON.stringify({ providers: [crofaiEndpoint] }), 'utf8');
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`Loaded endpoint config from ${globalConfigPath}`)
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('loads endpoints from OPENCODE_CONFIG_DIR', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, testDir } = createPluginContext();
+
+      try {
+        const configDir = join(testDir, 'opencode-config-dir');
+        mkdirSync(configDir, { recursive: true });
+        process.env.OPENCODE_CONFIG_DIR = configDir;
+
+        const configPath = join(configDir, configFileName);
+        writeFileSync(configPath, JSON.stringify({ providers: [crofaiEndpoint] }), 'utf8');
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`Loaded endpoint config from ${configPath}`)
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('loads endpoints from the .opencode subdirectory of the project', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        const dotOpencodeDir = join(input.directory, '.opencode');
+        mkdirSync(dotOpencodeDir, { recursive: true });
+        const configPath = join(dotOpencodeDir, configFileName);
+        writeFileSync(configPath, JSON.stringify({ providers: [crofaiEndpoint] }), 'utf8');
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`Loaded endpoint config from ${configPath}`)
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('loads endpoints from a .jsonc config file', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        const configPath = join(input.directory, 'opencode-openai-compatible.jsonc');
+        writeFileSync(configPath, JSON.stringify({ providers: [crofaiEndpoint] }), 'utf8');
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`Loaded endpoint config from ${configPath}`)
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('prefers .json over .jsonc in the same directory', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        writeProjectConfig(input.directory, JSON.stringify({ providers: [crofaiEndpoint] }));
+        writeFileSync(
+          join(input.directory, 'opencode-openai-compatible.jsonc'),
+          JSON.stringify({ providers: [groqEndpoint] }),
+          'utf8'
+        );
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.groq).toBeUndefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('parses comments and trailing commas while preserving URLs', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        writeProjectConfig(
+          input.directory,
+          `{
+  // Primary endpoint used for /connect auth
+  "primary": "crofai",
+  /* Block comment
+     spanning lines, with a URL inside: https://example.com/v1 */
+  "providers": [
+    {
+      "id": "crofai",
+      "name": "CrofAI",
+      // Double slashes inside this string must survive
+      "baseURL": "https://crof.ai/v1",
+      "headers": { "X-Note": "http://not-a-comment.example/v1 // still text" },
+    },
+  ],
+}
+`
+        );
+
+        const plugin = await createPlugin(input, {});
+        expect(plugin.provider.id).toBe('crofai');
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
+        expect(cfg.provider.crofai.options.headers).toEqual({
+          'X-Note': 'http://not-a-comment.example/v1 // still text',
+        });
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('prefers the env var, then the project file, then the global file', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, testDir, globalConfigDir } = createPluginContext();
+
+      try {
+        const globalEndpoint = {
+          id: 'globalep',
+          name: 'GlobalEP',
+          baseURL: 'https://global.dev/v1',
+        };
+        const envEndpoint = { id: 'envep', name: 'EnvEP', baseURL: 'https://env.dev/v1' };
+
+        writeFileSync(
+          join(globalConfigDir, configFileName),
+          JSON.stringify({ providers: [globalEndpoint] }),
+          'utf8'
+        );
+
+        // Global only: global file wins over the (empty) options
+        const globalOnly: any = {};
+        await (await createPlugin(input, {})).config(globalOnly);
+        expect(globalOnly.provider.globalep).toBeDefined();
+
+        // Project file beats the global file
+        writeProjectConfig(input.directory, JSON.stringify({ providers: [crofaiEndpoint] }));
+        const projectWins: any = {};
+        await (await createPlugin(input, {})).config(projectWins);
+        expect(projectWins.provider.crofai).toBeDefined();
+        expect(projectWins.provider.globalep).toBeUndefined();
+
+        // Env var beats the project file
+        const envConfigPath = join(testDir, 'env-config.json');
+        writeFileSync(envConfigPath, JSON.stringify({ providers: [envEndpoint] }), 'utf8');
+        process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = envConfigPath;
+
+        const envWins: any = {};
+        await (await createPlugin(input, {})).config(envWins);
+        expect(envWins.provider.envep).toBeDefined();
+        expect(envWins.provider.crofai).toBeUndefined();
+        expect(envWins.provider.globalep).toBeUndefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('prefers plugin options only after every config candidate misses', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, globalConfigDir } = createPluginContext();
+
+      try {
+        writeFileSync(
+          join(globalConfigDir, configFileName),
+          JSON.stringify({ providers: [crofaiEndpoint] }),
+          'utf8'
+        );
+
+        const plugin = await createPlugin(input, { providers: [groqEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.groq).toBeUndefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('logs every attempted path when no config file exists', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, globalConfigDir } = createPluginContext();
+
+      try {
+        const plugin = await createPlugin(input, { providers: [groqEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        const { log } = await import('../src/logger.ts');
+        const attemptedLog = (log as any).mock.calls
+          .map((call: any[]) => String(call[0]))
+          .find((message: string) => message.includes('No usable config file found'));
+
+        expect(attemptedLog).toBeDefined();
+        expect(attemptedLog).toContain(join(input.directory, configFileName));
+        expect(attemptedLog).toContain(join(input.directory, '.opencode', configFileName));
+        expect(attemptedLog).toContain(join(globalConfigDir, configFileName));
+        expect(attemptedLog).toContain('opencode-openai-compatible.jsonc');
+
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('No config file found; using plugin options')
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('reports an [ERROR] and continues when an explicit env config file is malformed', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, testDir, globalConfigDir } = createPluginContext();
+
+      try {
+        const envConfigPath = join(testDir, 'broken-config.json');
+        writeFileSync(envConfigPath, '{ bad json', 'utf8');
+        process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = envConfigPath;
+
+        writeFileSync(
+          join(globalConfigDir, configFileName),
+          JSON.stringify({ providers: [crofaiEndpoint] }),
+          'utf8'
+        );
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        // Falls through to the next candidate instead of going inactive
+        expect(cfg.provider.crofai).toBeDefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`[ERROR] Failed to read plugin config from ${envConfigPath}`)
+        );
+      } finally {
         cleanup();
       }
     });
