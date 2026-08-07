@@ -8,7 +8,7 @@ describe('package entrypoints', () => {
     const mod = await import('../src/index.ts');
 
     expect(Object.keys(mod).sort()).toEqual(['default']);
-    expect(mod.default.id).toBe('opencode-openai-compatible');
+    expect(mod.default.id).toBe('@tretrauit/opencode-openai-compatible');
     expect(typeof mod.default.server).toBe('function');
   });
 

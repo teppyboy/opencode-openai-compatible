@@ -1,4 +1,4 @@
-# opencode-openai-compatible
+# @tretrauit/opencode-openai-compatible
 
 OpenCode plugin that registers **one or more configurable OpenAI-compatible endpoints** as
 providers. Point it at any API that speaks the OpenAI chat completions / models protocol — a
@@ -22,7 +22,7 @@ gateway.
 ### Via OpenCode CLI
 
 ```bash
-opencode plugin -g opencode-openai-compatible
+opencode plugin -g @tretrauit/opencode-openai-compatible
 ```
 
 ### Via `opencode.json`
@@ -35,7 +35,7 @@ the tuple is passed verbatim to the plugin as its options:
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
     [
-      "opencode-openai-compatible",
+      "@tretrauit/opencode-openai-compatible",
       {
         "providers": [
           {

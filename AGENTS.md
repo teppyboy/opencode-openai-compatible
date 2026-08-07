@@ -68,7 +68,7 @@
 
 ### Overview
 
-`opencode-openai-compatible` registers every user-configured OpenAI-compatible endpoint from the
+`@tretrauit/opencode-openai-compatible` registers every user-configured OpenAI-compatible endpoint from the
 `opencode.json` `plugin` options tuple. It discovers models via `GET {baseURL}/models`, caches
 them per endpoint, refreshes caches in the background, and normalizes variant display names
 (Lightning, Precision, Flash, ...) without duplicate suffixes.
@@ -80,7 +80,7 @@ them per endpoint, refreshes caches in the background, and normalizes variant di
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
     [
-      "opencode-openai-compatible",
+      "@tretrauit/opencode-openai-compatible",
       {
         "providers": [
           {
@@ -130,11 +130,11 @@ the full options reference.
 
 Package exports:
 
-- `opencode-openai-compatible` - root plugin entrypoint, module default export only
-- `opencode-openai-compatible/server` - OpenCode server entrypoint, same dist file as root
-- `opencode-openai-compatible/factory` - reusable factory/helper entrypoint
+- `@tretrauit/opencode-openai-compatible` - root plugin entrypoint, module default export only
+- `@tretrauit/opencode-openai-compatible/server` - OpenCode server entrypoint, same dist file as root
+- `@tretrauit/opencode-openai-compatible/factory` - reusable factory/helper entrypoint
 
-Factory exports available from `opencode-openai-compatible/factory`:
+Factory exports available from `@tretrauit/opencode-openai-compatible/factory`:
 
 - `createOpenAICompatiblePlugin`
 - `buildVariantDisplayName`
