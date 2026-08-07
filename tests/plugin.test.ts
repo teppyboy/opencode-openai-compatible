@@ -1075,4 +1075,240 @@ describe('opencode-openai-compatible plugin', () => {
       cleanup();
     }
   });
+
+  describe('config file loading', () => {
+    const configFileName = 'opencode-openai-compatible.json';
+
+    const writeProjectConfig = (dir: string, content: string) => {
+      writeFileSync(join(dir, configFileName), content, 'utf8');
+    };
+
+    it('loads endpoints from the project config file', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      try {
+        writeProjectConfig(
+          input.directory,
+          JSON.stringify({
+            primary: 'crofai',
+            providers: [crofaiEndpoint, groqEndpoint],
+          })
+        );
+
+        const plugin = await createPlugin(input, {});
+        expect(plugin.provider.id).toBe('crofai');
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        // Both endpoints from the file are registered
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.groq).toBeDefined();
+        expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
+        expect(cfg.provider.groq.options.baseURL).toBe('https://api.groq.com/openai/v1');
+        expect(cfg.provider.crofai.models['kimi-k2.5']).toBeDefined();
+        expect(cfg.provider.groq.models['kimi-k2.5']).toBeDefined();
+
+        // Cache files written per endpoint from the file
+        expect(existsSync(cachePathFor('crofai'))).toBe(true);
+        expect(existsSync(cachePathFor('groq'))).toBe(true);
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `Loaded endpoint config from ${join(input.directory, configFileName)}`
+          )
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('uses the OPENCODE_OPENAI_COMPATIBLE_CONFIG env var file over the project file', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup, testDir } = createPluginContext();
+      const previousEnv = process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG;
+
+      try {
+        const envConfigPath = join(testDir, 'custom-config.json');
+        writeFileSync(envConfigPath, JSON.stringify({ providers: [crofaiEndpoint] }), 'utf8');
+        process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = envConfigPath;
+
+        // An unrelated config file in the project dir is ignored
+        writeProjectConfig(input.directory, JSON.stringify({ providers: [groqEndpoint] }));
+
+        const plugin = await createPlugin(input, {});
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
+        expect(cfg.provider.groq).toBeUndefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(`Loaded endpoint config from ${envConfigPath}`)
+        );
+      } finally {
+        if (previousEnv === undefined) {
+          delete process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG;
+        } else {
+          process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = previousEnv;
+        }
+        cleanup();
+      }
+    });
+
+    it('falls back to plugin options when no config file exists', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint, groqEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.groq).toBeDefined();
+        expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
+        expect(cfg.provider.groq.options.baseURL).toBe('https://api.groq.com/openai/v1');
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('No config file found; using plugin options')
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('falls back to options when the project config file is malformed', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        writeProjectConfig(input.directory, '{ bad json');
+
+        const plugin = await createPlugin(input, { providers: [groqEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.groq).toBeDefined();
+        expect(cfg.provider.groq.options.baseURL).toBe('https://api.groq.com/openai/v1');
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('[ERROR] Failed to read plugin config from')
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('stays inactive when the project config file is malformed and no options are given', async () => {
+      globalThis.fetch = vi.fn();
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        writeProjectConfig(input.directory, '{ bad json');
+
+        const plugin = await createPlugin(input, {});
+
+        expect(plugin).toEqual({});
+
+        const cfg: any = {};
+        await plugin.config?.(cfg);
+        expect(cfg.provider).toBeUndefined();
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('prefers the project config file over plugin options', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        writeProjectConfig(
+          input.directory,
+          JSON.stringify({
+            primary: 'crofai',
+            providers: [crofaiEndpoint],
+          })
+        );
+
+        const plugin = await createPlugin(input, { providers: [groqEndpoint] });
+
+        expect(plugin.provider.id).toBe('crofai');
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.groq).toBeUndefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('falls back to options when the env var config path does not exist', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const previousEnv = process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG;
+
+      try {
+        process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = join(input.directory, 'missing.json');
+
+        const plugin = await createPlugin(input, { providers: [groqEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.groq).toBeDefined();
+        expect(cfg.provider.groq.options.baseURL).toBe('https://api.groq.com/openai/v1');
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining('No config file found; using plugin options')
+        );
+      } finally {
+        if (previousEnv === undefined) {
+          delete process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG;
+        } else {
+          process.env.OPENCODE_OPENAI_COMPATIBLE_CONFIG = previousEnv;
+        }
+        cleanup();
+      }
+    });
+  });
 });

@@ -69,38 +69,40 @@
 ### Overview
 
 `@tretrauit/opencode-openai-compatible` registers every user-configured OpenAI-compatible endpoint from the
-`opencode.json` `plugin` options tuple. It discovers models via `GET {baseURL}/models`, caches
-them per endpoint, refreshes caches in the background, and normalizes variant display names
-(Lightning, Precision, Flash, ...) without duplicate suffixes.
+`opencode-openai-compatible.json` config file (or the legacy `opencode.json` `plugin` options
+tuple). It discovers models via `GET {baseURL}/models`, caches them per endpoint, refreshes
+caches in the background, and normalizes variant display names (Lightning, Precision, Flash, ...)
+without duplicate suffixes.
 
 ### Configuration
 
+Endpoints are configured in a separate `opencode-openai-compatible.json` file next to
+`opencode.json` (the plugin's project directory):
+
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    [
-      "@tretrauit/opencode-openai-compatible",
-      {
-        "providers": [
-          {
-            "id": "crofai",
-            "name": "CrofAI",
-            "baseURL": "https://crof.ai/v1",
-            "apiKey": "{env:CROFAI_API_KEY}"
-          }
-        ]
-      }
-    ]
+  "primary": "crofai",
+  "providers": [
+    {
+      "id": "crofai",
+      "name": "CrofAI",
+      "baseURL": "https://crof.ai/v1",
+      "apiKey": "{env:CROFAI_API_KEY}"
+    }
   ]
 }
 ```
 
-The tuple form passes the second element verbatim as the plugin's options. See `README.md` for
-the full options reference.
+Resolution order: `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var (explicit path) →
+`opencode-openai-compatible.json` in the project directory → legacy `opencode.json` plugin
+options tuple (still supported as fallback). The file schema is identical to the options
+object. See `README.md` for the full options reference.
 
 ### Current Behavior
 
+- Endpoint config loaded from `opencode-openai-compatible.json` in the project directory, or
+  from an explicit file path via the `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var; the
+  `opencode.json` plugin options tuple remains a fallback when no config file exists
 - Model list fetched from `GET {baseURL}/models` per endpoint
 - Model cache stored in OpenCode cache under `.cache/{id}-models.json` by default
 - All endpoints registered through the `config` hook by populating

@@ -27,8 +27,63 @@ opencode plugin -g @tretrauit/opencode-openai-compatible
 
 ### Via `opencode.json`
 
-Add the plugin with its endpoint configuration using the **tuple form** — the second element of
-the tuple is passed verbatim to the plugin as its options:
+Add the plugin as a bare entry — no options tuple needed:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@tretrauit/opencode-openai-compatible"]
+}
+```
+
+Endpoint configuration is loaded from a **separate config file** named
+`opencode-openai-compatible.json` in the same directory as your `opencode.json` (the project
+root):
+
+```json
+{
+  "primary": "crofai",
+  "fetchTimeoutMs": 30000,
+  "providers": [
+    {
+      "id": "crofai",
+      "name": "CrofAI",
+      "baseURL": "https://crof.ai/v1",
+      "apiKey": "{env:CROFAI_API_KEY}"
+    },
+    {
+      "id": "local",
+      "name": "Local",
+      "baseURL": "http://localhost:1234/v1"
+    }
+  ]
+}
+```
+
+With this example you get two providers: `crofai` (with its API key read from the
+`CROFAI_API_KEY` environment variable) and `local` (no key). `primary` selects which endpoint
+gets the interactive `/connect` auth flow and the runtime provider hook; when omitted the first
+provider is used. The config file uses the **same schema** as the plugin options documented
+below.
+
+#### Config file resolution
+
+The plugin looks for endpoint configuration in this order:
+
+1. `OPENCODE_OPENAI_COMPATIBLE_CONFIG` environment variable — an explicit path to the config
+   file. The path may be absolute or relative to the current working directory; on Windows use
+   the native path (e.g. `C:\Users\you\.config\opencode-openai-compatible.json`) or forward
+   slashes. If the file is missing or malformed, the plugin logs `[ERROR]` and moves on to the
+   next source.
+2. `opencode-openai-compatible.json` next to your `opencode.json` (the plugin's project
+   directory).
+3. Legacy plugin options (the tuple form below) — still supported as a fallback when no config
+   file exists.
+
+#### Legacy tuple options
+
+The tuple form still works when no config file exists — the second element is passed verbatim
+to the plugin as its options:
 
 ```json
 {
@@ -43,28 +98,19 @@ the tuple is passed verbatim to the plugin as its options:
             "name": "CrofAI",
             "baseURL": "https://crof.ai/v1",
             "apiKey": "{env:CROFAI_API_KEY}"
-          },
-          {
-            "id": "local",
-            "name": "Local",
-            "baseURL": "http://localhost:1234/v1"
           }
-        ],
-        "primary": "crofai"
+        ]
       }
     ]
   ]
 }
 ```
 
-With this example you get two providers: `crofai` (with its API key read from the
-`CROFAI_API_KEY` environment variable) and `local` (no key). `primary` selects which endpoint
-gets the interactive `/connect` auth flow and the runtime provider hook; when omitted the first
-provider is used.
-
 ## Options
 
-The plugin options object is the second element of the `plugin` tuple.
+The plugin options object is the second element of the `plugin` tuple — or the top-level
+fields of `opencode-openai-compatible.json`. Both use the same schema; a config file holds the
+same fields as the options object.
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
@@ -93,8 +139,9 @@ The plugin options object is the second element of the `plugin` tuple.
 
 - The **primary** endpoint gets the interactive `/connect` API-key auth flow (`type: 'api'`,
   key `key`). The returned key is injected as `Authorization: Bearer <key>` on requests.
-- **Other** endpoints use `apiKey` from the plugin options instead — either an environment
-  placeholder (`{env:...}`) or a literal value. They don't need `/connect`.
+- **Other** endpoints use `apiKey` from the endpoint config (plugin options or the config
+  file) instead — either an environment placeholder (`{env:...}`) or a literal value. They
+  don't need `/connect`.
 
 ## Behavior notes
 

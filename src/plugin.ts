@@ -1,4 +1,5 @@
 import type { Hooks } from '@opencode-ai/plugin';
+import { existsSync, readFileSync } from 'fs';
 import { basename, join } from 'path';
 import { log, initLogger } from './logger.js';
 import type { OpenAICompatibleModel } from './openai-compatible-plugin.js';
@@ -14,6 +15,8 @@ import {
 } from './openai-compatible-plugin.js';
 
 const PLUGIN_NAME = 'opencode-openai-compatible';
+const CONFIG_FILE_NAME = 'opencode-openai-compatible.json';
+const CONFIG_PATH_ENV_VAR = 'OPENCODE_OPENAI_COMPATIBLE_CONFIG';
 const DEFAULT_PROVIDER_NPM = '@ai-sdk/openai-compatible';
 const DEFAULT_MODEL_ENDPOINT = '/models';
 const DEFAULT_CONTEXT_LIMIT = 202752;
@@ -46,6 +49,50 @@ export interface OpenAICompatiblePluginOptions {
   providers?: OpenAICompatibleEndpointOptions[];
   primary?: string;
   fetchTimeoutMs?: number;
+}
+
+function readPluginConfigFile(configPath: string): OpenAICompatiblePluginOptions | null {
+  try {
+    const rawConfig = readFileSync(configPath, 'utf8');
+    return JSON.parse(rawConfig) as OpenAICompatiblePluginOptions;
+  } catch (error) {
+    log(
+      `[${PLUGIN_NAME} Plugin] [ERROR] Failed to read plugin config from ${configPath}: ${
+        error instanceof Error ? error.toString() : String(error)
+      }`
+    );
+    return null;
+  }
+}
+
+function resolvePluginConfig(
+  input: any,
+  options?: OpenAICompatiblePluginOptions
+): OpenAICompatiblePluginOptions | null {
+  const envConfigPath = process.env[CONFIG_PATH_ENV_VAR];
+  if (envConfigPath) {
+    const envConfig = readPluginConfigFile(envConfigPath);
+    if (envConfig) {
+      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${envConfigPath}`);
+      return envConfig;
+    }
+  }
+
+  const projectConfigPath = input?.directory ? join(input.directory, CONFIG_FILE_NAME) : null;
+  if (projectConfigPath && existsSync(projectConfigPath)) {
+    const projectConfig = readPluginConfigFile(projectConfigPath);
+    if (projectConfig) {
+      log(`[${PLUGIN_NAME} Plugin] Loaded endpoint config from ${projectConfigPath}`);
+      return projectConfig;
+    }
+  }
+
+  if (options?.providers && options.providers.length > 0) {
+    log(`[${PLUGIN_NAME} Plugin] No config file found; using plugin options`);
+    return options;
+  }
+
+  return null;
 }
 
 interface ResolvedEndpoint {
@@ -104,10 +151,11 @@ export async function createOpenAICompatibleEndpointsPlugin(
   await initLogger(input.client);
   log(`[${PLUGIN_NAME} Plugin] Plugin initializing...`);
 
-  const providedProviders = options?.providers ?? [];
+  const resolvedOptions = resolvePluginConfig(input, options);
+  const providedProviders = resolvedOptions?.providers ?? [];
   if (providedProviders.length === 0) {
     log(
-      `[${PLUGIN_NAME} Plugin] No providers configured; plugin inactive. Configure endpoints via the plugin options in opencode.json`
+      `[${PLUGIN_NAME} Plugin] No providers configured; plugin inactive. Configure endpoints via the opencode-openai-compatible.json config file or plugin options in opencode.json`
     );
     return {};
   }
@@ -146,7 +194,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
     return {};
   }
 
-  const primaryId = options?.primary ?? providers[0]?.id;
+  const primaryId = resolvedOptions?.primary ?? providers[0]?.id;
   const primary = providers.find((endpoint) => endpoint.id === primaryId) ?? providers[0];
   if (primary.id !== primaryId) {
     log(
@@ -154,7 +202,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
     );
   }
 
-  const fetchTimeoutMs = options?.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  const fetchTimeoutMs = resolvedOptions?.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
 
   return {
     config: async (outputConfig: any) => {
