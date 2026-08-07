@@ -24,7 +24,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tretrauit/opencode-openai-compatible.git"
+    "url": "git+https://github.com/teppyboy/opencode-openai-compatible.git"
   },
   "publishConfig": {
     "access": "public"
