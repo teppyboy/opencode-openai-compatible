@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.3] - 2026-08-08
+
+- fix: expand `{env:NAME}` placeholders in endpoint `apiKey` and header values instead of
+  passing the literal placeholder through to the provider. A missing or empty variable is
+  reported with `[ERROR]` naming the variable and the provider is registered without a key
+- fix: the `config` hook now discovers models with the resolved endpoint key instead of an
+  empty string, so authenticated `/models` endpoints no longer fail with `401`
+- fix: `provider.models()` falls back to the configured endpoint key when the runtime auth
+  context has no key
+- fix: never write a model cache with an empty model list, and treat an existing cache file
+  containing zero models as missing so the plugin refetches
+- docs: document `{env:}` expansion semantics and OpenCode `1.18.15` plugin loading (the
+  `{ id, server }` default export is still the supported server contract; the `effect`/`setup`
+  `SchemaError` warning from OpenCode's config-plugin schema is benign)
+
 ## [0.1.2] - 2026-08-08
 
 - fix: discover the config file in the global OpenCode config directory

@@ -29,6 +29,7 @@ const DEFAULT_CONTEXT_LIMIT = 202752;
 const DEFAULT_OUTPUT_LIMIT = 202752;
 const DEFAULT_FAMILY = 'unknown';
 const DEFAULT_FETCH_TIMEOUT_MS = 30000;
+const ENV_PLACEHOLDER_PATTERN = /^\{env:([^}]*)\}$/;
 
 export interface OpenAICompatibleEndpointAuth {
   label?: string;
@@ -55,6 +56,66 @@ export interface OpenAICompatiblePluginOptions {
   providers?: OpenAICompatibleEndpointOptions[];
   primary?: string;
   fetchTimeoutMs?: number;
+}
+
+/**
+ * Expands a `{env:NAME}` placeholder into the value of that environment variable.
+ *
+ * Values that are not placeholders are returned untouched, so literal keys keep working.
+ * A placeholder naming a missing or empty variable logs `[ERROR]` and resolves to
+ * `undefined` — an unexpanded `{env:...}` string must never reach the endpoint as a key.
+ */
+function expandEnvPlaceholder(
+  rawValue: string | undefined,
+  fieldName: string,
+  endpointId: string
+): string | undefined {
+  if (rawValue === undefined) {
+    return undefined;
+  }
+
+  const placeholderMatch = rawValue.match(ENV_PLACEHOLDER_PATTERN);
+  if (!placeholderMatch) {
+    return rawValue;
+  }
+
+  const variableName = placeholderMatch[1].trim();
+  if (variableName === '') {
+    log(
+      `[${PLUGIN_NAME} Plugin] [ERROR] Provider ${endpointId} ${fieldName} uses an empty {env:} placeholder`
+    );
+    return undefined;
+  }
+
+  const variableValue = process.env[variableName];
+  if (!variableValue) {
+    log(
+      `[${PLUGIN_NAME} Plugin] [ERROR] Provider ${endpointId} ${fieldName} references environment variable ${variableName}, which is unset or empty`
+    );
+    return undefined;
+  }
+
+  return variableValue;
+}
+
+function expandEnvPlaceholdersInHeaders(
+  headers: Record<string, string> | undefined,
+  endpointId: string
+): Record<string, string> | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const expandedHeaders: Record<string, string> = {};
+  for (const [headerName, headerValue] of Object.entries(headers)) {
+    const expandedValue = expandEnvPlaceholder(headerValue, `header ${headerName}`, endpointId);
+    if (expandedValue === undefined) {
+      continue;
+    }
+    expandedHeaders[headerName] = expandedValue;
+  }
+
+  return expandedHeaders;
 }
 
 function findNextMeaningfulIndex(jsonText: string, startIndex: number): number {
@@ -305,8 +366,8 @@ function resolveEndpoint(endpoint: OpenAICompatibleEndpointOptions): ResolvedEnd
     id: endpoint.id,
     name: endpoint.name,
     baseURL: endpoint.baseURL,
-    apiKey: endpoint.apiKey,
-    headers: endpoint.headers,
+    apiKey: expandEnvPlaceholder(endpoint.apiKey, 'apiKey', endpoint.id),
+    headers: expandEnvPlaceholdersInHeaders(endpoint.headers, endpoint.id),
     authLabel: endpoint.auth?.label ?? 'API Key',
     authPlaceholder: endpoint.auth?.placeholder ?? `${endpoint.id}-api-key`,
     authPromptMessage: endpoint.auth?.message ?? `Enter your ${endpoint.name} API key`,
@@ -390,13 +451,13 @@ export async function createOpenAICompatibleEndpointsPlugin(
             cachedModels ??
             (await fetchModels(
               endpoint.baseURL,
-              '',
+              endpoint.apiKey ?? '',
               endpoint.modelEndpoint,
               fetchTimeoutMs,
               endpoint.name
             ));
 
-          if (!cachedModels) {
+          if (!cachedModels && models.length > 0) {
             writeModelCache(endpoint.cachePath, models, endpoint.logPrefix);
           }
         } catch (error) {
@@ -448,7 +509,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
       async models(_provider: any, ctx: any) {
         log(`${primary.logPrefix} Provider hook - models() called`);
 
-        const apiKey = ctx.auth?.key ?? '';
+        const apiKey = ctx.auth?.key || primary.apiKey || '';
         if (!apiKey) {
           log(`${primary.logPrefix} No auth found, skipping model registration`);
         }

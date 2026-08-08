@@ -170,6 +170,11 @@ export function readModelCache(
       return null;
     }
 
+    if (parsedCache.models.length === 0) {
+      log(`${logPrefix} Skipping model cache with an empty model list`);
+      return null;
+    }
+
     const fetchedAt = Date.parse(parsedCache.fetchedAt);
     if (Number.isNaN(fetchedAt)) {
       return null;
@@ -191,6 +196,11 @@ export function writeModelCache(
   models: OpenAICompatibleModel[],
   logPrefix: string
 ): void {
+  if (models.length === 0) {
+    log(`${logPrefix} Refusing to write an empty model cache`);
+    return;
+  }
+
   try {
     mkdirSync(dirname(cacheFile), { recursive: true });
     writeFileSync(

@@ -200,7 +200,9 @@ describe('opencode-openai-compatible plugin', () => {
       expect(cfg.provider.crofai.npm).toBe('@ai-sdk/openai-compatible');
       expect(cfg.provider.crofai.name).toBe('CrofAI');
       expect(cfg.provider.crofai.options.baseURL).toBe('https://crof.ai/v1');
-      expect(cfg.provider.crofai.options.apiKey).toBe('{env:CROFAI_API_KEY}');
+      // {env:CROFAI_API_KEY} is unset here, so the placeholder is dropped rather than
+      // leaked to the provider as a literal key.
+      expect(cfg.provider.crofai.options.apiKey).toBeUndefined();
       expect(cfg.provider.crofai.models['kimi-k2.5']).toMatchObject({
         id: 'kimi-k2.5',
         name: 'MoonshotAI: Kimi K2.5',
@@ -1102,6 +1104,257 @@ describe('opencode-openai-compatible plugin', () => {
     } finally {
       cleanup();
     }
+  });
+
+  describe('{env:VAR} expansion', () => {
+    const setEnv = (name: string, value: string | undefined) => {
+      const previous = process.env[name];
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+      return () => {
+        if (previous === undefined) {
+          delete process.env[name];
+          return;
+        }
+        process.env[name] = previous;
+      };
+    };
+
+    it('expands {env:VAR} into the resolved apiKey', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_API_KEY', 'resolved-secret');
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai.options.apiKey).toBe('resolved-secret');
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+
+    it('logs an [ERROR] and omits the key when the variable is unset', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_API_KEY', undefined);
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        // Never leak the raw placeholder as if it were a real credential.
+        expect(cfg.provider.crofai.options.apiKey).toBeUndefined();
+
+        const { log } = await import('../src/logger.ts');
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'references environment variable CROFAI_API_KEY, which is unset or empty'
+          )
+        );
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+
+    it('treats an empty environment variable as missing', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_API_KEY', '');
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai.options.apiKey).toBeUndefined();
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+
+    it('leaves literal keys untouched', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, apiKey: 'sk-literal-value' }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai.options.apiKey).toBe('sk-literal-value');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('expands {env:VAR} inside endpoint headers', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_TENANT', 'tenant-42');
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [
+            {
+              id: 'hdrenv',
+              name: 'HdrEnv',
+              baseURL: 'https://hdrenv.example/v1',
+              headers: { 'X-Tenant': '{env:CROFAI_TENANT}', 'X-Static': 'plain' },
+            },
+          ],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.hdrenv.options.headers).toEqual({
+          'X-Tenant': 'tenant-42',
+          'X-Static': 'plain',
+        });
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+
+    it('sends the resolved key on the config-hook model fetch', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_API_KEY', 'resolved-secret');
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        const requestInit = (globalThis.fetch as any).mock.calls[0][1];
+        expect(requestInit.headers.Authorization).toBe('Bearer resolved-secret');
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+
+    it('falls back to the endpoint key in provider.models when auth is empty', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      const { input, cleanup } = createPluginContext();
+      const restoreEnv = setEnv('CROFAI_API_KEY', 'resolved-secret');
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        await plugin.provider.models({} as any, { auth: { type: 'api', key: '' } });
+
+        const requestInit = (globalThis.fetch as any).mock.calls[0][1];
+        expect(requestInit.headers.Authorization).toBe('Bearer resolved-secret');
+      } finally {
+        restoreEnv();
+        cleanup();
+      }
+    });
+  });
+
+  describe('empty model cache guard', () => {
+    it('never writes a cache file when discovery returns no models', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [] }),
+      });
+
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(cfg.provider.crofai).toBeDefined();
+        expect(cfg.provider.crofai.models).toEqual({});
+        expect(existsSync(cachePathFor('crofai'))).toBe(false);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('ignores a stale 0-model cache and refetches', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      mkdirSync(dirname(cachePathFor('crofai')), { recursive: true });
+      writeFileSync(
+        cachePathFor('crofai'),
+        JSON.stringify({ fetchedAt: new Date().toISOString(), models: [] }, null, 2),
+        'utf8'
+      );
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: mockModels }),
+      });
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        // The empty cache must not win over a real fetch.
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(cfg.provider.crofai.models['kimi-k2.5']).toBeDefined();
+
+        const cachedPayload = JSON.parse(readFileSync(cachePathFor('crofai'), 'utf8')) as {
+          models: Array<{ id: string }>;
+        };
+        expect(cachedPayload.models.length).toBeGreaterThan(0);
+      } finally {
+        cleanup();
+      }
+    });
   });
 
   describe('config file loading', () => {

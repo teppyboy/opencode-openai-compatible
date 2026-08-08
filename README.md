@@ -159,7 +159,7 @@ same fields as the options object.
 | `id` | `string` | — (required) | Provider id, e.g. `crofai`. Must be unique across endpoints. |
 | `name` | `string` | — (required) | Display name, e.g. `CrofAI`. |
 | `baseURL` | `string` | — (required) | Base URL of the OpenAI-compatible API, e.g. `https://crof.ai/v1`. |
-| `apiKey` | `string` | — | API key injected into the provider's `options.apiKey`. Use an env placeholder like `{env:MY_API_KEY}` or a literal. |
+| `apiKey` | `string` | — | API key injected into the provider's `options.apiKey`. A `{env:MY_API_KEY}` placeholder is expanded from the environment when the plugin starts; if the variable is unset or empty the plugin logs `[ERROR]` and registers the provider without the key (it never sends the raw placeholder as a credential). A literal value is used as-is. |
 | `headers` | `Record<string, string>` | — | Extra headers injected into the provider's `options.headers`. |
 | `auth` | `OpenAICompatibleEndpointAuth` | — | Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
 | `cacheFile` | `string` | `{id}-models.json` | Cache file name under `.cache/`. |
@@ -176,6 +176,9 @@ same fields as the options object.
 - **Other** endpoints use `apiKey` from the endpoint config (plugin options or the config
   file) instead — either an environment placeholder (`{env:...}`) or a literal value. They
   don't need `/connect`.
+- `{env:...}` placeholders are expanded by this plugin at startup, before any model request is
+  made. A missing or empty variable is reported with `[ERROR]` and the provider is registered
+  without a key rather than sending the literal placeholder.
 
 ## Behavior notes
 
@@ -189,6 +192,15 @@ same fields as the options object.
 - Each endpoint's model cache is written under the OpenCode cache directory:
   `~/.cache/opencode/.cache/{cacheFile}` (or `$LOCALAPPDATA/opencode` on Windows, or
   `$XDG_CACHE_HOME/opencode` when set).
+- Empty model lists are never cached. A stale cache file containing zero models is ignored
+  and treated as missing, so the plugin refetches instead of registering an empty provider.
+- **OpenCode 1.18.15 plugin loading**: the package default export remains the classic
+  `{ id, server }` module. OpenCode 1.18 keeps loading that shape for entries in the `plugin`
+  array (the loader accepts `{ id, server }` objects, plain default functions, and named
+  `server` exports). OpenCode also probes the newer `{ id, effect }` / `{ id, setup }`
+  config-plugin schema for the same entries; a `SchemaError` logged against a plugin while
+  both schemas are tried is benign — the legacy loader that actually registers this plugin's
+  `config`/`provider`/`auth` hooks still runs it. The extra keys are not needed for 1.18.15.
 - The config hook merges discovered models with any models you defined yourself for the same
   provider id — your explicit config models win.
 - User-provided provider fields (e.g. `env`, `blacklist`, `whitelist`) are preserved.

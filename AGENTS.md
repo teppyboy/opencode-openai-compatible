@@ -116,6 +116,14 @@ reference.
   project directory, project/worktree `.opencode/` subdirectories, or the global OpenCode config
   directory, or from an explicit file path via the `OPENCODE_OPENAI_COMPATIBLE_CONFIG` env var;
   the `opencode.json` plugin options tuple remains a fallback when no config file exists
+- `{env:NAME}` placeholders in `apiKey` and header values are expanded by the plugin at startup
+  (NOT passed through literally). A missing or empty variable logs `[ERROR]` naming the variable
+  and the provider is registered without the key; the raw placeholder is never sent as a
+  credential. Literal keys are unchanged
+- Config-hook model discovery uses the RESOLVED endpoint key (env-expanded) so authenticated
+  model fetches do not fail with an empty key
+- Empty model lists are never written to cache, and a cached file with `models: []` is treated
+  as missing (refetch instead of registering an empty provider)
 - Plugin config parsing is JSONC-tolerant: `//` comments, `/* */` comments, and trailing commas
   are stripped by a character scanner that preserves comment-looking text inside JSON strings
   (e.g. `https://...`). The model cache parser is strict JSON and must stay that way
@@ -177,6 +185,35 @@ config-defined custom providers are added to its provider database. Because conf
 endpoints are not in OpenCode's built-in models database, the plugin must populate
 `outputConfig.provider[id].models` directly in the `config` hook for EVERY endpoint.
 Keep package-entry tests and config-model tests when changing exports or provider registration.
+
+OpenCode `1.18.15` still loads this plugin from the `{ id, server }` default export. Its
+server-side loader (`kind: "server"`) accepts three shapes, in this order: a default export
+object with a `server()` function, a plain default-exported function, and named function
+exports. Verified against the shipped 1.18.15 binary:
+
+```js
+function rQ(q,$,J,Q="strict"){let W=q.default;
+  if(!b(W)){if(Q==="detect")return; throw TypeError(`Plugin ${$} must default export an object with ${J}()`)}
+  if(Q==="detect"&&!("id"in W)&&!("server"in W)&&!("tui"in W))return;
+  ...
+  if(J==="server"&&Z===void 0)throw TypeError(`Plugin ${$} must default export an object with server()`)}
+```
+
+Separately, OpenCode also decodes `plugin` entries against the newer config-plugin schema:
+
+```js
+var gs=t.Struct({default:t.Union([
+  t.Struct({id:t.String,effect:t.declare((o)=>typeof o==="function")}),
+  t.Struct({id:t.String,setup:t.declare((o)=>typeof o==="function")})])});
+```
+
+A `SchemaError(Missing key at ["default"]["effect"] / ["default"]["setup"])` WARN logged for a
+plugin is emitted by that second path and is NOT fatal — plugins that only export
+`{ id, server }` (including `opencode-pty` and this one) still load and run. Do NOT add
+`effect`/`setup` keys to satisfy that warning: `setup`-only modules are rejected by the server
+loader with "must default export an object with server()". This was confirmed by probing the
+real 1.18.15 binary with four module shapes; `{id,server}`, plain function, and named `server`
+all loaded, while `{id,setup}` failed.
 
 ### Development
 
