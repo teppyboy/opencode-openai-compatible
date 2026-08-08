@@ -224,6 +224,12 @@ Real OpenCode model schema:
   but the `budget_tokens` form does not survive the `@ai-sdk/openai-compatible` mapping (the
   budget mapper returns undefined). Those models are registered with discrete effort levels only
   and the range is intentionally dropped
+- Reasoning levels are per format via `REASONING_LEVELS_BY_FORMAT` in
+  `src/openai-compatible-plugin.ts`: `openai` -> low/medium/high/xhigh; `claude-budget` and
+  `claude-adaptive` -> low/medium/high/max; `gemini-level`, `gemini-budget`, `zai`, `kimi`,
+  `deepseek`, `minimax`, `qwen` -> low/medium/high; unknown or null -> `DEFAULT_LEVELS`
+- The `xhigh` and `max` levels are an ACCEPTED, UNVERIFIED assumption: they were never probed
+  against upstream, and the risk was explicitly accepted — do not re-litigate or probe to confirm
 
 ### Duplicate `/connect` Entry: DISPROVEN
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
@@ -9,7 +9,12 @@ vi.mock('../src/logger.ts', () => ({
   initLogger: vi.fn().mockResolvedValue(undefined),
 }));
 
-const originalFetch = globalThis.fetch;
+// `bun-types` declares the global `fetch` with a required `preconnect` member, so assigning a
+// bare vitest mock to `globalThis.fetch` fails `tsc --noEmit`. Go through a widened alias
+// instead of casting at every assignment site.
+const testGlobal = globalThis as { fetch: typeof globalThis.fetch | Mock };
+
+const originalFetch = testGlobal.fetch;
 
 const crofaiEndpoint = {
   id: 'crofai',
@@ -175,11 +180,11 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    testGlobal.fetch = originalFetch;
   });
 
   it('registers multiple endpoints into config', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -232,7 +237,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('does nothing when no providers are configured', async () => {
-    globalThis.fetch = vi.fn();
+    testGlobal.fetch = vi.fn();
 
     const { input, cleanup } = createPluginContext();
 
@@ -243,14 +248,14 @@ describe('opencode-openai-compatible plugin', () => {
       const cfg: any = {};
       await plugin.config?.(cfg);
       expect(cfg.provider).toBeUndefined();
-      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(testGlobal.fetch).not.toHaveBeenCalled();
     } finally {
       cleanup();
     }
   });
 
   it('skips endpoints missing baseURL', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -267,14 +272,14 @@ describe('opencode-openai-compatible plugin', () => {
 
       expect(cfg.provider.broken).toBeUndefined();
       expect(cfg.provider.groq).toBeDefined();
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
   });
 
   it('keeps the first provider when ids are duplicated', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -295,7 +300,7 @@ describe('opencode-openai-compatible plugin', () => {
       expect(cfg.provider.dup).toBeDefined();
       expect(cfg.provider.dup.name).toBe('First');
       expect(cfg.provider.dup.options.baseURL).toBe('https://first.example/v1');
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
@@ -325,7 +330,7 @@ describe('opencode-openai-compatible plugin', () => {
       'utf8'
     );
 
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -338,14 +343,14 @@ describe('opencode-openai-compatible plugin', () => {
 
       expect(cfg.provider.crofai.models['cached-model'].name).toBe('Cached Model');
       expect(cfg.provider.crofai.models['kimi-k2.5']).toBeUndefined();
-      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(testGlobal.fetch).not.toHaveBeenCalled();
     } finally {
       cleanup();
     }
   });
 
   it('preserves user-provided provider config while merging discovered models', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -436,7 +441,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('injects Authorization header in auth loader', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    testGlobal.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
 
     const { input, cleanup } = createPluginContext();
 
@@ -449,7 +454,7 @@ describe('opencode-openai-compatible plugin', () => {
 
       // Make a request through the fetch wrapper
       await result.fetch('https://example.com', {});
-      const calledHeaders = new Headers((globalThis.fetch as any).mock.calls[0][1].headers);
+      const calledHeaders = new Headers((testGlobal.fetch as any).mock.calls[0][1].headers);
       expect(calledHeaders.get('Authorization')).toBe('Bearer test-api-key');
     } finally {
       cleanup();
@@ -457,7 +462,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('registers models with correct display names via provider.models', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -521,7 +526,7 @@ describe('opencode-openai-compatible plugin', () => {
       },
     ];
 
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockFlashModels }),
     });
@@ -562,7 +567,7 @@ describe('opencode-openai-compatible plugin', () => {
       },
     ];
 
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockParenthesizedModels }),
     });
@@ -583,7 +588,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('exposes reasoning variants for models that support reasoning', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -638,7 +643,7 @@ describe('opencode-openai-compatible plugin', () => {
       'utf8'
     );
 
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         data: [
@@ -659,7 +664,7 @@ describe('opencode-openai-compatible plugin', () => {
       const models = await plugin.provider.models({} as any, ctx);
 
       expect(models['cached-model'].name).toBe('Cached Model');
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
 
       for (let attempt = 0; attempt < 10; attempt++) {
         const cachedPayload = JSON.parse(readFileSync(cachePathFor('crofai'), 'utf8')) as {
@@ -684,7 +689,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('rejects when fetching models for the primary provider fails', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 401,
       statusText: 'Unauthorized',
@@ -728,7 +733,7 @@ describe('opencode-openai-compatible plugin', () => {
       'utf8'
     );
 
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+    testGlobal.fetch = vi.fn().mockRejectedValue(new Error('network down'));
 
     try {
       const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
@@ -737,14 +742,14 @@ describe('opencode-openai-compatible plugin', () => {
       const models = await plugin.provider.models({} as any, ctx);
 
       expect(models['stale-model'].name).toBe('Stale Model');
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
   });
 
   it('writes fetched models to cache', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -772,7 +777,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('respects a custom cacheFile per endpoint', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -805,7 +810,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('uses the primary option to pick a non-first endpoint for hooks', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -833,7 +838,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('does nothing when all providers are invalid', async () => {
-    globalThis.fetch = vi.fn();
+    testGlobal.fetch = vi.fn();
 
     const { input, cleanup } = createPluginContext();
 
@@ -850,14 +855,14 @@ describe('opencode-openai-compatible plugin', () => {
       const cfg: any = {};
       await plugin.config?.(cfg);
       expect(cfg.provider).toBeUndefined();
-      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(testGlobal.fetch).not.toHaveBeenCalled();
     } finally {
       cleanup();
     }
   });
 
   it('skips endpoints missing an id', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -873,14 +878,14 @@ describe('opencode-openai-compatible plugin', () => {
       await plugin.config(cfg);
 
       expect(cfg.provider.groq).toBeDefined();
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
   });
 
   it('skips endpoints missing a name', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -897,14 +902,14 @@ describe('opencode-openai-compatible plugin', () => {
 
       expect(cfg.provider.noname).toBeUndefined();
       expect(cfg.provider.groq).toBeDefined();
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
   });
 
   it('registers other endpoints when one endpoint fails to fetch models', async () => {
-    globalThis.fetch = vi
+    testGlobal.fetch = vi
       .fn()
       .mockRejectedValueOnce(new Error('network down'))
       .mockResolvedValueOnce({
@@ -927,14 +932,14 @@ describe('opencode-openai-compatible plugin', () => {
       expect(cfg.provider.down.models).toEqual({});
       expect(cfg.provider.groq).toBeDefined();
       expect(cfg.provider.groq.models['kimi-k2.5']).toBeDefined();
-      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(2);
     } finally {
       cleanup();
     }
   });
 
   it('falls back to the first provider when primary references an unknown id', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -961,7 +966,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('injects endpoint headers into provider options', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -990,7 +995,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('rejects when the model fetch exceeds fetchTimeoutMs', async () => {
-    globalThis.fetch = vi.fn(
+    testGlobal.fetch = vi.fn(
       (
         _url: string,
         init: { signal?: { addEventListener: (type: 'abort', cb: () => void) => void } } | undefined
@@ -1023,7 +1028,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('skips endpoints with reserved ids', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -1045,7 +1050,7 @@ describe('opencode-openai-compatible plugin', () => {
       expect(Object.prototype.hasOwnProperty.call(cfg.provider, '__proto__')).toBe(false);
       expect(Object.prototype.hasOwnProperty.call(cfg.provider, 'constructor')).toBe(false);
       expect(cfg.provider.groq).toBeDefined();
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
     }
@@ -1058,7 +1063,7 @@ describe('opencode-openai-compatible plugin', () => {
       { id: 'constructor', name: 'Evil' },
     ];
 
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: modelsWithReserved }),
     });
@@ -1084,7 +1089,7 @@ describe('opencode-openai-compatible plugin', () => {
   });
 
   it('single-flights concurrent provider.models calls without a cache', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    testGlobal.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: mockModels }),
     });
@@ -1100,7 +1105,7 @@ describe('opencode-openai-compatible plugin', () => {
         plugin.provider.models({} as any, ctx),
       ]);
 
-      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
       expect(first['kimi-k2.5'].name).toBe('MoonshotAI: Kimi K2.5');
       expect(second['kimi-k2.5'].name).toBe('MoonshotAI: Kimi K2.5');
     } finally {
@@ -1126,7 +1131,7 @@ describe('opencode-openai-compatible plugin', () => {
     };
 
     it('expands {env:VAR} into the resolved apiKey', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1148,7 +1153,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('logs an [ERROR] and omits the key when the variable is unset', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1178,7 +1183,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('treats an empty environment variable as missing', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1200,7 +1205,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('leaves literal keys untouched', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1222,7 +1227,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('expands {env:VAR} inside endpoint headers', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1256,7 +1261,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('sends the resolved key on the config-hook model fetch', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1270,7 +1275,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        const requestInit = (globalThis.fetch as any).mock.calls[0][1];
+        const requestInit = (testGlobal.fetch as any).mock.calls[0][1];
         expect(requestInit.headers.Authorization).toBe('Bearer resolved-secret');
       } finally {
         restoreEnv();
@@ -1279,7 +1284,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('falls back to the endpoint key in provider.models when auth is empty', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1292,7 +1297,7 @@ describe('opencode-openai-compatible plugin', () => {
 
         await plugin.provider.models({} as any, { auth: { type: 'api', key: '' } });
 
-        const requestInit = (globalThis.fetch as any).mock.calls[0][1];
+        const requestInit = (testGlobal.fetch as any).mock.calls[0][1];
         expect(requestInit.headers.Authorization).toBe('Bearer resolved-secret');
       } finally {
         restoreEnv();
@@ -1303,7 +1308,7 @@ describe('opencode-openai-compatible plugin', () => {
 
   describe('empty model cache guard', () => {
     it('never writes a cache file when discovery returns no models', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: [] }),
       });
@@ -1334,7 +1339,7 @@ describe('opencode-openai-compatible plugin', () => {
         'utf8'
       );
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1346,7 +1351,7 @@ describe('opencode-openai-compatible plugin', () => {
         await plugin.config(cfg);
 
         // The empty cache must not win over a real fetch.
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(cfg.provider.crofai.models['kimi-k2.5']).toBeDefined();
 
         const cachedPayload = JSON.parse(readFileSync(cachePathFor('crofai'), 'utf8')) as {
@@ -1391,7 +1396,7 @@ describe('opencode-openai-compatible plugin', () => {
       const { input, cleanup, cachePathFor } = createPluginContext();
 
       writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
@@ -1399,7 +1404,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(testGlobal.fetch).not.toHaveBeenCalled();
         expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
         expect(cfg.provider.crofai.models['newly-added-model']).toBeUndefined();
       } finally {
@@ -1414,7 +1419,7 @@ describe('opencode-openai-compatible plugin', () => {
 
       const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
       writeCache(cachePathFor('crofai'), sixMinutesAgo, cachedOnlyModel);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
@@ -1422,7 +1427,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
         expect(cfg.provider.crofai.models['newly-added-model'].name).toBe('Newly Added Model');
 
@@ -1444,7 +1449,7 @@ describe('opencode-openai-compatible plugin', () => {
         new Date(Date.now() - 1000).toISOString(),
         cachedOnlyModel
       );
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, {
@@ -1454,7 +1459,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
       } finally {
         cleanup();
@@ -1469,7 +1474,7 @@ describe('opencode-openai-compatible plugin', () => {
         new Date(Date.now() - 30 * 60 * 1000).toISOString(),
         cachedOnlyModel
       );
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, {
@@ -1479,7 +1484,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(testGlobal.fetch).not.toHaveBeenCalled();
         expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
       } finally {
         cleanup();
@@ -1490,7 +1495,7 @@ describe('opencode-openai-compatible plugin', () => {
       const { input, cleanup, cachePathFor } = createPluginContext();
 
       writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, {
@@ -1500,7 +1505,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
       } finally {
         cleanup();
@@ -1511,7 +1516,7 @@ describe('opencode-openai-compatible plugin', () => {
       const { input, cleanup, cachePathFor } = createPluginContext();
 
       writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, {
@@ -1521,7 +1526,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
       } finally {
         cleanup();
@@ -1532,7 +1537,7 @@ describe('opencode-openai-compatible plugin', () => {
       const { input, cleanup, cachePathFor } = createPluginContext();
 
       writeCache(cachePathFor('crofai'), '2000-01-01T00:00:00.000Z', cachedOnlyModel);
-      globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+      testGlobal.fetch = vi.fn().mockRejectedValue(new Error('network down'));
 
       try {
         const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
@@ -1540,7 +1545,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         // Offline resilience: the endpoint is unreachable, so the stale list still registers
         // instead of leaving the provider with zero models.
         expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
@@ -1556,7 +1561,7 @@ describe('opencode-openai-compatible plugin', () => {
       writeCache(cachePathFor('crofai'), newerTimestamp, [
         { id: 'newer-model', name: 'Newer Model' },
       ]);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, {
@@ -1566,7 +1571,7 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config(cfg);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         // The fetched list is registered for this session...
         expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
 
@@ -1586,7 +1591,7 @@ describe('opencode-openai-compatible plugin', () => {
       const { input, cleanup, cachePathFor } = createPluginContext();
 
       writeCache(cachePathFor('crofai'), '2000-01-01T00:00:00.000Z', cachedOnlyModel);
-      globalThis.fetch = respondWith(serverModelsWithAddition);
+      testGlobal.fetch = respondWith(serverModelsWithAddition);
 
       try {
         const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
@@ -1594,7 +1599,7 @@ describe('opencode-openai-compatible plugin', () => {
         const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
         const models = await plugin.provider.models({} as any, ctx);
 
-        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(testGlobal.fetch).toHaveBeenCalledTimes(1);
         expect(models['newly-added-model']).toBeDefined();
       } finally {
         cleanup();
@@ -1610,7 +1615,7 @@ describe('opencode-openai-compatible plugin', () => {
     };
 
     it('loads endpoints from the project config file', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1656,7 +1661,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('uses the OPENCODE_OPENAI_COMPATIBLE_CONFIG env var file over the project file', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1696,7 +1701,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('falls back to plugin options when no config file exists', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1724,7 +1729,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('falls back to options when the project config file is malformed', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1752,7 +1757,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('stays inactive when the project config file is malformed and no options are given', async () => {
-      globalThis.fetch = vi.fn();
+      testGlobal.fetch = vi.fn();
 
       const { input, cleanup } = createPluginContext();
 
@@ -1766,14 +1771,14 @@ describe('opencode-openai-compatible plugin', () => {
         const cfg: any = {};
         await plugin.config?.(cfg);
         expect(cfg.provider).toBeUndefined();
-        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(testGlobal.fetch).not.toHaveBeenCalled();
       } finally {
         cleanup();
       }
     });
 
     it('prefers the project config file over plugin options', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1804,7 +1809,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('falls back to options when the env var config path does not exist', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1838,7 +1843,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('loads endpoints from the global opencode config directory', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1867,7 +1872,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('loads endpoints from OPENCODE_CONFIG_DIR', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1899,7 +1904,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('loads endpoints from the .opencode subdirectory of the project', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1929,7 +1934,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('loads endpoints from a .jsonc config file', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1957,7 +1962,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('prefers .json over .jsonc in the same directory', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -1985,7 +1990,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('parses comments and trailing commas while preserving URLs', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -2030,7 +2035,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('prefers the env var, then the project file, then the global file', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -2079,7 +2084,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('prefers plugin options only after every config candidate misses', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -2106,7 +2111,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('logs every attempted path when no config file exists', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });
@@ -2139,7 +2144,7 @@ describe('opencode-openai-compatible plugin', () => {
     });
 
     it('reports an [ERROR] and continues when an explicit env config file is malformed', async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      testGlobal.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ data: mockModels }),
       });

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -9,7 +9,12 @@ vi.mock('../src/logger.ts', () => ({
   initLogger: vi.fn().mockResolvedValue(undefined),
 }));
 
-const originalFetch = globalThis.fetch;
+// `bun-types` declares the global `fetch` with a required `preconnect` member, so assigning a
+// bare vitest mock to `globalThis.fetch` fails `tsc --noEmit`. Go through a widened alias
+// instead of casting at every assignment site.
+const testGlobal = globalThis as { fetch: typeof globalThis.fetch | Mock };
+
+const originalFetch = testGlobal.fetch;
 
 const nineRouterEndpoint = {
   id: '9router',
@@ -321,7 +326,7 @@ describe('capabilities-based model metadata', () => {
     vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: models }) });
 
   const registerConfigModels = async (models: any[], endpointOverrides: any = {}) => {
-    globalThis.fetch = respondWith(models);
+    testGlobal.fetch = respondWith(models);
     const context = createPluginContext();
     const plugin = await createPlugin(context.input, {
       providers: [{ ...nineRouterEndpoint, ...endpointOverrides }],
@@ -338,7 +343,7 @@ describe('capabilities-based model metadata', () => {
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    testGlobal.fetch = originalFetch;
   });
 
   describe('capabilities mapping', () => {
@@ -580,7 +585,7 @@ describe('capabilities-based model metadata', () => {
     });
 
     it('registers them through the runtime provider.models hook as well', async () => {
-      globalThis.fetch = respondWith(liveModels);
+      testGlobal.fetch = respondWith(liveModels);
       const context = createPluginContext();
 
       try {
@@ -649,7 +654,7 @@ describe('capabilities-based model metadata', () => {
     });
 
     it('keeps slash ids and their metadata across a cache round-trip', async () => {
-      globalThis.fetch = respondWith(liveModels);
+      testGlobal.fetch = respondWith(liveModels);
       const context = createPluginContext();
 
       try {
@@ -666,12 +671,12 @@ describe('capabilities-based model metadata', () => {
         );
 
         // Second run reads the fresh cache instead of the network...
-        globalThis.fetch = vi.fn();
+        testGlobal.fetch = vi.fn();
         const secondPlugin = await createPlugin(context.input, { providers: [nineRouterEndpoint] });
         const secondConfig: any = {};
         await secondPlugin.config(secondConfig);
 
-        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(testGlobal.fetch).not.toHaveBeenCalled();
 
         // ...and the slash-id models survive it byte for byte.
         for (const id of slashIds) {
@@ -685,7 +690,7 @@ describe('capabilities-based model metadata', () => {
     });
 
     it('keeps slash ids intact in the runtime provider.models registry', async () => {
-      globalThis.fetch = respondWith(liveModels);
+      testGlobal.fetch = respondWith(liveModels);
       const context = createPluginContext();
 
       try {
@@ -741,7 +746,7 @@ describe('capabilities-based model metadata', () => {
     });
 
     it('exposes a none variant for thinkingCanDisable: true in the runtime hook', async () => {
-      globalThis.fetch = respondWith(liveModels);
+      testGlobal.fetch = respondWith(liveModels);
       const context = createPluginContext();
 
       try {

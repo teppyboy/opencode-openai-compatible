@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.5] - 2026-08-09
+
+- feat: derive reasoning levels per `thinkingFormat` instead of using one shared level set —
+  `openai` gets `low`/`medium`/`high`/`xhigh`, `claude-budget` and `claude-adaptive` get
+  `low`/`medium`/`high`/`max`, and `gemini-level`, `gemini-budget`, `zai`, `kimi`, `deepseek`,
+  `minimax`, and `qwen` get `low`/`medium`/`high`. An unknown or absent format falls back to the
+  default levels, and `thinkingCanDisable` still prepends the "reasoning off" level
+- note: the `xhigh` (`openai`) and `max` (`claude-*`) levels are an ACCEPTED **UNVERIFIED**
+  assumption. They were not probed against upstream, so a provider that rejects them would only
+  surface at request time
+
 ## [0.1.4] - 2026-08-08
 
 - fix: bound the model cache with a TTL (`cacheTtlMs`, default `300000`). An expired cache now
