@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.1.4] - 2026-08-08
+
+- fix: bound the model cache with a TTL (`cacheTtlMs`, default `300000`). An expired cache now
+  triggers discovery during the same startup, so a model added on the endpoint is selectable on
+  the next start instead of the one after it
+- feat: `cacheTtlMs` is configurable per endpoint — `0` always fetches fresh, negative values
+  clamp to `0`, and an absent or non-finite value falls back to the 5 minute default
+- fix: an expired cache is still used as an offline fallback when discovery fails, so an
+  unreachable endpoint keeps its previously known models
+- fix: skip a cache write when the on-disk list is newer than the incoming one, so a slow
+  background refresh cannot overwrite a fresher result
+- feat: read model metadata from the upstream `capabilities` object (`contextWindow`,
+  `maxOutput`, `vision`, `pdf`, `audioInput`, `videoInput`, `imageOutput`, `audioOutput`,
+  `tools`, `reasoning`, `thinkingCanDisable`). Flat legacy fields still take precedence
+- feat: register reasoning levels via `reasoning_options`, which is what OpenCode `1.18.15` uses
+  to build selectable reasoning variants; models reporting `thinkingCanDisable` also get a
+  "reasoning off" level
+- fix: models that report no `capabilities` at all still register with text-only modalities and
+  the endpoint's default limits
+- feat: export `DEFAULT_CACHE_TTL_MS`, `normalizeCacheTtlMs`, `readModelCacheEntry`,
+  `resolveModelsWithCacheFallback`, and the `ModelCacheEntry` type from the factory subpath
+- docs: document cache TTL semantics, `capabilities` support and its precedence rules, reasoning
+  level behavior, and the budget-format limitation (`gemini-budget` / `claude-budget` models are
+  registered with discrete effort levels only)
+- note: upstream advertises a `capabilities.search` flag, but the OpenCode model schema has no
+  field for it, so it is deliberately ignored
+
 ## [0.1.3] - 2026-08-08
 
 - fix: expand `{env:NAME}` placeholders in endpoint `apiKey` and header values instead of

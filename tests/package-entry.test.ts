@@ -16,9 +16,13 @@ describe('package entrypoints', () => {
     const mod = await import('../src/factory.ts');
 
     expect(Object.keys(mod).sort()).toEqual([
+      'DEFAULT_CACHE_TTL_MS',
       'buildVariantDisplayName',
       'createOpenAICompatiblePlugin',
       'createReasoningVariants',
+      'normalizeCacheTtlMs',
+      'readModelCacheEntry',
+      'resolveModelsWithCacheFallback',
     ]);
   });
 

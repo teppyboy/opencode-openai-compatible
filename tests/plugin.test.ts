@@ -596,14 +596,16 @@ describe('opencode-openai-compatible plugin', () => {
       const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
       const models = await plugin.provider.models({} as any, ctx);
 
-      // Reasoning-capable models have low/medium/high variants
+      // Reasoning-capable models have low/medium/high variants. OpenCode maps an effort level
+      // for `@ai-sdk/openai-compatible` to `{ reasoningEffort }`, and the AI SDK serializes that
+      // camelCase option into the `reasoning_effort` request body field.
       expect(models['kimi-k2.5'].variants).toBeDefined();
-      expect(models['kimi-k2.5'].variants.low).toEqual({ reasoning_effort: 'low' });
-      expect(models['kimi-k2.5'].variants.medium).toEqual({ reasoning_effort: 'medium' });
-      expect(models['kimi-k2.5'].variants.high).toEqual({ reasoning_effort: 'high' });
+      expect(models['kimi-k2.5'].variants.low).toEqual({ reasoningEffort: 'low' });
+      expect(models['kimi-k2.5'].variants.medium).toEqual({ reasoningEffort: 'medium' });
+      expect(models['kimi-k2.5'].variants.high).toEqual({ reasoningEffort: 'high' });
 
       expect(models['kimi-k2.5-lightning'].variants).toBeDefined();
-      expect(models['kimi-k2.5-lightning'].variants.low).toEqual({ reasoning_effort: 'low' });
+      expect(models['kimi-k2.5-lightning'].variants.low).toEqual({ reasoningEffort: 'low' });
 
       // Non-reasoning model has no variants
       expect(models['glm-5'].variants).toBeUndefined();
@@ -1351,6 +1353,249 @@ describe('opencode-openai-compatible plugin', () => {
           models: Array<{ id: string }>;
         };
         expect(cachedPayload.models.length).toBeGreaterThan(0);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe('model cache TTL', () => {
+    const writeCache = (path: string, fetchedAt: string, models: any[]) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify({ fetchedAt, models }, null, 2), 'utf8');
+    };
+
+    const cachedOnlyModel = [
+      {
+        id: 'cached-model',
+        name: 'Cached Model',
+        context_length: 1024,
+        max_completion_tokens: 512,
+      },
+    ];
+
+    const serverModelsWithAddition = [
+      ...cachedOnlyModel,
+      {
+        id: 'newly-added-model',
+        name: 'Newly Added Model',
+        context_length: 4096,
+        max_completion_tokens: 2048,
+      },
+    ];
+
+    const respondWith = (models: any[]) =>
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: models }) });
+
+    it('registers from a fresh cache without fetching', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeUndefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    // The user-reported bug: a model added on the endpoint used to appear only after the
+    // SECOND restart because an unexpired-forever cache short-circuited discovery.
+    it('refetches an expired cache and registers newly added models in the same run', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+      writeCache(cachePathFor('crofai'), sixMinutesAgo, cachedOnlyModel);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
+        expect(cfg.provider.crofai.models['newly-added-model'].name).toBe('Newly Added Model');
+
+        const cachedPayload = JSON.parse(readFileSync(cachePathFor('crofai'), 'utf8')) as {
+          models: Array<{ id: string }>;
+        };
+        expect(cachedPayload.models.map((model) => model.id)).toContain('newly-added-model');
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('treats a cache exactly at the TTL boundary as expired', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      // age === ttl is a miss; freshness requires age < ttl.
+      writeCache(
+        cachePathFor('crofai'),
+        new Date(Date.now() - 1000).toISOString(),
+        cachedOnlyModel
+      );
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, cacheTtlMs: 1000 }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('keeps a cache younger than a custom TTL', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(
+        cachePathFor('crofai'),
+        new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        cachedOnlyModel
+      );
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, cacheTtlMs: 60 * 60 * 1000 }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('always fetches when cacheTtlMs is 0, even with a cache written this instant', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, cacheTtlMs: 0 }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('clamps a negative cacheTtlMs to 0 rather than caching forever', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(cachePathFor('crofai'), new Date().toISOString(), cachedOnlyModel);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, cacheTtlMs: -1 }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('falls back to an expired cache in the config hook when discovery fails', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(cachePathFor('crofai'), '2000-01-01T00:00:00.000Z', cachedOnlyModel);
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        // Offline resilience: the endpoint is unreachable, so the stale list still registers
+        // instead of leaving the provider with zero models.
+        expect(cfg.provider.crofai.models['cached-model']).toBeDefined();
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('does not overwrite a newer cached list with an older discovery result', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      const newerTimestamp = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      writeCache(cachePathFor('crofai'), newerTimestamp, [
+        { id: 'newer-model', name: 'Newer Model' },
+      ]);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, {
+          providers: [{ ...crofaiEndpoint, cacheTtlMs: 0 }],
+        });
+
+        const cfg: any = {};
+        await plugin.config(cfg);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        // The fetched list is registered for this session...
+        expect(cfg.provider.crofai.models['newly-added-model']).toBeDefined();
+
+        // ...but the newer on-disk list is left alone.
+        const cachedPayload = JSON.parse(readFileSync(cachePathFor('crofai'), 'utf8')) as {
+          fetchedAt: string;
+          models: Array<{ id: string }>;
+        };
+        expect(cachedPayload.fetchedAt).toBe(newerTimestamp);
+        expect(cachedPayload.models.map((model) => model.id)).toEqual(['newer-model']);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it('refetches an expired cache in the primary provider.models hook', async () => {
+      const { input, cleanup, cachePathFor } = createPluginContext();
+
+      writeCache(cachePathFor('crofai'), '2000-01-01T00:00:00.000Z', cachedOnlyModel);
+      globalThis.fetch = respondWith(serverModelsWithAddition);
+
+      try {
+        const plugin = await createPlugin(input, { providers: [crofaiEndpoint] });
+
+        const ctx = { auth: { type: 'api' as const, key: 'test-api-key' } };
+        const models = await plugin.provider.models({} as any, ctx);
+
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+        expect(models['newly-added-model']).toBeDefined();
       } finally {
         cleanup();
       }

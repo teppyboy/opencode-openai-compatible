@@ -137,10 +137,102 @@ reference.
 - `provider.models()` runtime hook runs for the PRIMARY endpoint only (backward compatibility
   for OpenCode `≤1.14.30` and catalog providers)
 - `auth` hook targets the PRIMARY endpoint only; other endpoints use `apiKey` from options
-- Cached models used immediately on startup when available
-- Cache refreshed in background when the primary provider model hook runs
+- Model cache is TTL-bound (`cacheTtlMs`, default `300000`); a fresh cache registers without a
+  fetch, an expired cache triggers discovery in the SAME run, and an expired cache is still used
+  as an offline fallback when discovery fails. See "Model Cache TTL" below
 - Cached models continue to work if the endpoint is unavailable
-- Reasoning-capable models expose `low`, `medium`, and `high` variants
+- Model metadata is read from either the `capabilities` object or the flat legacy fields; flat
+  fields win. See "Model Metadata / capabilities" below
+- Reasoning-capable models expose `low`, `medium`, and `high` levels, plus a disabled level when
+  `capabilities.thinkingCanDisable` is true
+
+### Model Cache TTL
+
+- `cacheTtlMs` is per endpoint. Absent or non-finite falls back to `DEFAULT_CACHE_TTL_MS`
+  (`300000`). `0` means never register from cache. Negative values clamp to `0`
+- Freshness is `age < ttl`. A cache exactly AT the TTL is expired. `normalizeCacheTtlMs` is the
+  single normalization point; do not re-derive the clamp elsewhere
+- `readModelCacheEntry` returns `{ models, fetchedAt, expired }` and applies NO policy;
+  `readModelCache` is the freshness-filtered wrapper. `resolveModelsWithCacheFallback` owns the
+  policy: fresh cache wins outright, otherwise fetch, and on fetch failure fall back to an
+  expired cache (propagating the error only when there is no cache at all)
+- STALE-FALLBACK RULE: expiry means "don't register without checking", not "discard". Never make
+  an expired cache unusable on the failure path — an unreachable endpoint must keep its
+  previously known models
+- Why the TTL exists: without it, a model added upstream only appeared after the SECOND restart.
+  The first restart registered the cached list and merely refreshed in the background
+- `writeModelCache` refuses empty lists AND skips writes when the on-disk `fetchedAt` is newer
+  than the incoming one, so a slow background refresh cannot clobber a fresher list
+
+### Model Metadata / `capabilities`
+
+Upstream `GET /models` entries carry a `capabilities` object. Observed live schema (89 models):
+
+```json
+{
+  "vision": false, "pdf": false, "audioInput": false, "videoInput": false,
+  "imageOutput": false, "audioOutput": false, "search": false, "tools": true,
+  "reasoning": true, "thinkingFormat": "zai", "thinkingCanDisable": true,
+  "thinkingRange": null, "contextWindow": 200000, "maxOutput": 128000
+}
+```
+
+Mapping into the OpenCode model schema:
+
+- `contextWindow` -> `limit.context`, `maxOutput` -> `limit.output`
+- `vision`/`pdf`/`audioInput`/`videoInput` -> `modalities.input` (always starts with `text`)
+- `imageOutput`/`audioOutput` -> `modalities.output` (always starts with `text`)
+- `tools` -> `tool_call`; `reasoning` -> `reasoning` + `reasoning_options`
+- `thinkingCanDisable: true` -> prepends `null` to the effort values (the "off" level)
+
+PRECEDENCE: flat legacy fields beat `capabilities`. `context_length`, `max_completion_tokens`,
+`modalities`, `supports_tool_calls` override their capability equivalents. `custom_reasoning` and
+`reasoning_effort` are checked as a PAIR — if either is present they alone decide reasoning
+support and `capabilities.reasoning` is ignored entirely.
+
+Models with NO `capabilities` key (live: `random-bs`, `ixe-fatfuck`, `test`) must still register,
+falling back to `{input:['text'],output:['text']}`, `reasoning: false`, `tool_call: true`, and the
+endpoint's default limits.
+
+Model ids containing slashes are common (live: 86 of 89, e.g.
+`nvidia/deepseek-ai/deepseek-v4-flash`). They must survive verbatim as config model keys, `id`,
+`api.id`, display names, and cache round-trips. Never split a model id on `/`.
+
+`search` HAS NO SCHEMA SLOT. Upstream advertises `capabilities.search` on ~40 models
+(86 of 89 carry the key), but the real OpenCode model schema has no field for it. It is
+deliberately NOT parsed, NOT plumbed, and NOT kept as inert metadata. Do not add it back.
+
+### Reasoning Options (OpenCode 1.18.15)
+
+Real OpenCode model schema:
+
+```
+{id, name, family?, release_date, attachment, reasoning, temperature, tool_call,
+ reasoning_options?, interleaved?, cost?, limit{context,input?,output}, modalities?,
+ experimental?, status?, provider?}
+```
+
+- 1.18.15 derives selectable reasoning variants from `reasoning_options`. A `variants` key in a
+  config-hook model is DISCARDED by that schema
+- `reasoning_options` is a union: `effort{values}` | `toggle` | `budget_tokens{min?,max?}`
+- The runtime `provider.models()` hook (OpenCode `≤1.14.30`) still uses `variants`, and the
+  effort value MUST be camelCase `reasoningEffort`. snake_case `reasoning_effort` is actively
+  broken for `@ai-sdk/openai-compatible`: the option object is spread and then overwritten with
+  `undefined`, so the setting silently vanishes
+- THINKING FORMAT LIMITATION: budget formats are not expressible. Live `thinkingFormat` values
+  include `gemini-budget` and `claude-budget` with a `thinkingRange` (e.g. `{min:0,max:24576}`),
+  but the `budget_tokens` form does not survive the `@ai-sdk/openai-compatible` mapping (the
+  budget mapper returns undefined). Those models are registered with discrete effort levels only
+  and the range is intentionally dropped
+
+### Duplicate `/connect` Entry: DISPROVEN
+
+A reported duplicate provider entry in `/connect` was NOT caused by this plugin registering
+itself twice. Evidence: `GET /provider/auth` lists `9router` exactly ONCE. The second entry was
+the user's own hand-written `self-hosted` provider in `opencode.json` pointing at the same
+backend. OpenCode additionally dedupes by `Object.hasOwn(D.existingProviders,E)`, so a plugin
+auth entry cannot double-register. The speculative conditional-auth change made to "fix" this was
+REVERTED and must stay reverted.
 
 ### Architecture
 
@@ -148,8 +240,9 @@ reference.
   endpoint/plugin option types
 - `src/openai-compatible-plugin.ts` - shared single-provider factory
   (`createOpenAICompatiblePlugin`) plus reusable module-level helpers
-  (`readModelCache`/`writeModelCache`/`fetchModels`/`buildModelRegistry`/
-  `buildConfigModelRegistry`/`buildVariantDisplayName`/`createReasoningVariants`)
+  (`readModelCacheEntry`/`readModelCache`/`writeModelCache`/`resolveModelsWithCacheFallback`/
+  `normalizeCacheTtlMs`/`fetchModels`/`buildModelRegistry`/`buildConfigModelRegistry`/
+  `buildVariantDisplayName`/`createReasoningVariants`)
 - `src/index.ts` - package root entrypoint; exports ONLY the `{ id, server }` plugin module
 - `src/factory.ts` - public factory subpath entrypoint for reusable helper exports
 - `src/logger.ts` - optional debug logger
@@ -167,6 +260,9 @@ Factory exports available from `@tretrauit/opencode-openai-compatible/factory`:
 - `createOpenAICompatiblePlugin`
 - `buildVariantDisplayName`
 - `createReasoningVariants`
+- `DEFAULT_CACHE_TTL_MS` / `normalizeCacheTtlMs`
+- `readModelCacheEntry` / `resolveModelsWithCacheFallback`
+- `ModelCacheEntry` type
 - `OpenAICompatibleModel` type
 - `OpenAICompatibleEndpointOptions` / `OpenAICompatibleEndpointAuth` / `OpenAICompatiblePluginOptions` types
 

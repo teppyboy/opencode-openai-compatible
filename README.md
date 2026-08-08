@@ -11,11 +11,13 @@ gateway.
   URL, and API key
 - discovers models via `GET {baseURL}/models` for each endpoint
 - caches model metadata per endpoint in the OpenCode cache under `.cache/{id}-models.json`
-- uses cached models immediately on startup
-- refreshes the cache in the background
-- falls back to cached models if an endpoint is unavailable
+- uses cached models while they are fresh, and refetches once the cache passes its TTL so models
+  added on the endpoint show up on the next start rather than the one after
+- keeps a stale cache as an offline fallback when an endpoint is unreachable
+- reads either the modern `capabilities` object or the older flat model fields
 - normalizes variant names like `Lightning` and `Precision` without duplicate suffixes
-- exposes `low` / `medium` / `high` reasoning variants for reasoning-capable models
+- exposes `low` / `medium` / `high` reasoning variants for reasoning-capable models, plus a
+  disabled level for models that allow turning reasoning off
 
 ## Install
 
@@ -163,6 +165,7 @@ same fields as the options object.
 | `headers` | `Record<string, string>` | — | Extra headers injected into the provider's `options.headers`. |
 | `auth` | `OpenAICompatibleEndpointAuth` | — | Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
 | `cacheFile` | `string` | `{id}-models.json` | Cache file name under `.cache/`. |
+| `cacheTtlMs` | `number` | `300000` (5 min) | How long a cached model list may be used to register this endpoint. See [Model cache TTL](#model-cache-ttl). |
 | `modelEndpoint` | `string` | `/models` | Path appended to `baseURL` for model discovery. |
 | `npm` | `string` | `@ai-sdk/openai-compatible` | Provider npm package reported to OpenCode. |
 | `contextLimit` | `number` | `202752` | Default context limit when a model doesn't report one. |
@@ -179,6 +182,121 @@ same fields as the options object.
 - `{env:...}` placeholders are expanded by this plugin at startup, before any model request is
   made. A missing or empty variable is reported with `[ERROR]` and the provider is registered
   without a key rather than sending the literal placeholder.
+
+## Model cache TTL
+
+Each endpoint's discovered model list is cached under the OpenCode cache directory. The cache has
+a time-to-live, controlled per endpoint by `cacheTtlMs`:
+
+| `cacheTtlMs` | Behavior |
+| ------------ | -------- |
+| absent / not a finite number | Defaults to `300000` (5 minutes). |
+| `> 0` | The cache registers models while `age < cacheTtlMs`. |
+| `0` | Never register from the cache — always fetch fresh. |
+| negative | Clamped to `0`, i.e. always fetch fresh. |
+
+A cache whose age is **exactly** the TTL counts as expired: freshness requires `age < ttl`.
+
+**Why this matters:** without a TTL, a model added on your endpoint only appeared after the
+*second* restart — the first restart registered the old cached list, and only refreshed it in the
+background for next time. With the TTL, an expired cache triggers discovery during the same
+startup, so a newly added model is selectable immediately.
+
+**Stale cache is still an offline fallback.** Expiry only means "don't register from this without
+checking". If discovery then fails (endpoint down, network gone, bad key), the expired list is
+used anyway so your provider keeps its previously known models instead of collapsing to zero. If
+there is no cache at all, the discovery error propagates.
+
+Two further guarantees:
+
+- an empty model list is never written to the cache, and a cache file containing `models: []` is
+  treated as missing, so a transient "no models" answer can't poison the cache
+- a cache write is skipped when the on-disk list is *newer* than the list being written, so a slow
+  background refresh can't overwrite a fresher result
+
+## Model metadata
+
+Model metadata is read from `GET {baseURL}/models`. Two shapes are supported, and **flat fields
+always win over the `capabilities` object** when both are present.
+
+### `capabilities` object
+
+```json
+{
+  "id": "gc/gemini-2.5-pro",
+  "capabilities": {
+    "vision": true,
+    "pdf": false,
+    "audioInput": true,
+    "videoInput": true,
+    "imageOutput": false,
+    "audioOutput": false,
+    "tools": true,
+    "reasoning": true,
+    "thinkingFormat": "gemini-budget",
+    "thinkingCanDisable": true,
+    "thinkingRange": { "min": 0, "max": 24576 },
+    "contextWindow": 1048576,
+    "maxOutput": 65536
+  }
+}
+```
+
+| Capability | Maps to |
+| ---------- | ------- |
+| `contextWindow` | `limit.context` |
+| `maxOutput` | `limit.output` |
+| `vision` | `modalities.input` += `image` |
+| `pdf` | `modalities.input` += `pdf` |
+| `audioInput` | `modalities.input` += `audio` |
+| `videoInput` | `modalities.input` += `video` |
+| `imageOutput` | `modalities.output` += `image` |
+| `audioOutput` | `modalities.output` += `audio` |
+| `tools` | `tool_call` |
+| `reasoning` | `reasoning` + `reasoning_options` |
+| `thinkingCanDisable` | adds the "reasoning off" level |
+
+`modalities.input` and `modalities.output` always start with `text`.
+
+### Flat fields (take precedence)
+
+`context_length`, `max_completion_tokens`, `modalities`, `custom_reasoning`, `reasoning_effort`,
+`supports_tool_calls`, `family`, `name`, and `pricing` are read directly and override the
+equivalent capability. `custom_reasoning` / `reasoning_effort` are checked as a pair: if either is
+present, they alone decide reasoning support and `capabilities.reasoning` is ignored.
+
+### Models with no metadata
+
+A model that reports neither `capabilities` nor flat fields still registers. It falls back to
+`{ input: ['text'], output: ['text'] }`, `reasoning: false`, `tool_call: true`, and the
+endpoint's `contextLimit` / `outputLimit` defaults.
+
+### Unsupported: `search`
+
+Some endpoints advertise a `capabilities.search` flag (on the reference endpoint: 86 of 89 models
+carry the key, 40 with `true`). The OpenCode model schema has **no field for it**, so the plugin
+ignores it entirely rather than inventing a slot. Unknown capability keys never block
+registration.
+
+## Reasoning
+
+Reasoning-capable models are registered with `reasoning_options`, which is what OpenCode 1.18.15
+uses to build selectable reasoning levels:
+
+```json
+{ "reasoning_options": [{ "type": "effort", "values": ["low", "medium", "high"] }] }
+```
+
+- models with `thinkingCanDisable: true` get `null` prepended, giving a "reasoning off" level
+- the runtime `provider.models()` hook (for OpenCode ≤ 1.14.30) exposes the same levels as
+  `variants`, using the **camelCase** `reasoningEffort` key — `@ai-sdk/openai-compatible`
+  serializes that into the `reasoning_effort` request field. A snake_case key there is silently
+  dropped
+
+**Budget-style thinking is not expressible.** Endpoints that report `thinkingFormat` values like
+`gemini-budget` or `claude-budget` with a `thinkingRange` are still registered with discrete
+effort levels only. OpenCode's `budget_tokens` form of `reasoning_options` does not survive the
+`@ai-sdk/openai-compatible` mapping, so the range is intentionally dropped.
 
 ## Behavior notes
 
@@ -204,8 +322,9 @@ same fields as the options object.
 - The config hook merges discovered models with any models you defined yourself for the same
   provider id — your explicit config models win.
 - User-provided provider fields (e.g. `env`, `blacklist`, `whitelist`) are preserved.
-- Reasoning-capable models (reported via `custom_reasoning` / `reasoning_effort`) get `low`,
-  `medium`, and `high` variants with `reasoning_effort` set.
+- Reasoning-capable models (via `capabilities.reasoning`, or the flat `custom_reasoning` /
+  `reasoning_effort` fields) get `low`, `medium`, and `high` levels, plus a disabled level when
+  the endpoint reports `thinkingCanDisable`. See [Reasoning](#reasoning).
 
 ## Local development
 

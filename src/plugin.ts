@@ -11,7 +11,9 @@ import {
   createReasoningVariants,
   fetchModels,
   getOpenCodeCacheDirectory,
-  readModelCache,
+  normalizeCacheTtlMs,
+  readModelCacheEntry,
+  resolveModelsWithCacheFallback,
   writeModelCache,
 } from './openai-compatible-plugin.js';
 
@@ -45,6 +47,14 @@ export interface OpenAICompatibleEndpointOptions {
   headers?: Record<string, string>;
   auth?: OpenAICompatibleEndpointAuth;
   cacheFile?: string;
+  /**
+   * How long a cached model list may be used to register this endpoint, in milliseconds.
+   *
+   * Absent or non-numeric falls back to 5 minutes (`DEFAULT_CACHE_TTL_MS`). `0` never registers
+   * from cache and always fetches fresh. Negative values are clamped to `0`. An expired cache is
+   * still used as an offline fallback when discovery fails.
+   */
+  cacheTtlMs?: number;
   modelEndpoint?: string;
   npm?: string;
   contextLimit?: number;
@@ -342,6 +352,7 @@ interface ResolvedEndpoint {
   authPlaceholder: string;
   authPromptMessage: string;
   cachePath: string;
+  cacheTtlMs: number;
   npm: string;
   modelEndpoint: string;
   contextLimit: number;
@@ -372,6 +383,7 @@ function resolveEndpoint(endpoint: OpenAICompatibleEndpointOptions): ResolvedEnd
     authPlaceholder: endpoint.auth?.placeholder ?? `${endpoint.id}-api-key`,
     authPromptMessage: endpoint.auth?.message ?? `Enter your ${endpoint.name} API key`,
     cachePath,
+    cacheTtlMs: normalizeCacheTtlMs(endpoint.cacheTtlMs),
     npm: endpoint.npm ?? DEFAULT_PROVIDER_NPM,
     modelEndpoint: endpoint.modelEndpoint ?? DEFAULT_MODEL_ENDPOINT,
     contextLimit: endpoint.contextLimit ?? DEFAULT_CONTEXT_LIMIT,
@@ -446,20 +458,27 @@ export async function createOpenAICompatibleEndpointsPlugin(
       for (const endpoint of providers) {
         let models: OpenAICompatibleModel[] = [];
         try {
-          const cachedModels = readModelCache(endpoint.cachePath, endpoint.logPrefix);
-          models =
-            cachedModels ??
-            (await fetchModels(
-              endpoint.baseURL,
-              endpoint.apiKey ?? '',
-              endpoint.modelEndpoint,
-              fetchTimeoutMs,
-              endpoint.name
-            ));
+          const cacheEntry = readModelCacheEntry(
+            endpoint.cachePath,
+            endpoint.logPrefix,
+            endpoint.cacheTtlMs
+          );
 
-          if (!cachedModels && models.length > 0) {
-            writeModelCache(endpoint.cachePath, models, endpoint.logPrefix);
-          }
+          models = await resolveModelsWithCacheFallback({
+            cacheEntry,
+            logPrefix: endpoint.logPrefix,
+            fetchModels: async () => {
+              const fetchedModels = await fetchModels(
+                endpoint.baseURL,
+                endpoint.apiKey ?? '',
+                endpoint.modelEndpoint,
+                fetchTimeoutMs,
+                endpoint.name
+              );
+              writeModelCache(endpoint.cachePath, fetchedModels, endpoint.logPrefix, Date.now());
+              return fetchedModels;
+            },
+          });
         } catch (error) {
           log(
             `${endpoint.logPrefix} [ERROR] ${endpoint.name} failed: ${
@@ -522,7 +541,7 @@ export async function createOpenAICompatibleEndpointsPlugin(
             fetchTimeoutMs,
             primary.name
           );
-          writeModelCache(primary.cachePath, fetchedModels, primary.logPrefix);
+          writeModelCache(primary.cachePath, fetchedModels, primary.logPrefix, Date.now());
           return fetchedModels;
         };
 
@@ -565,14 +584,20 @@ export async function createOpenAICompatibleEndpointsPlugin(
           modelRefreshPromises.set(primary.id, refreshPromise);
         };
 
-        const cachedModels = readModelCache(primary.cachePath, primary.logPrefix);
-        const models = cachedModels
-          ? (() => {
-              log(`${primary.logPrefix} Using cached model list (${cachedModels.length} models)`);
-              refreshModelsInBackground();
-              return cachedModels;
-            })()
-          : await fetchAndCacheModelsSingleFlight();
+        const cacheEntry = readModelCacheEntry(
+          primary.cachePath,
+          primary.logPrefix,
+          primary.cacheTtlMs
+        );
+        if (cacheEntry && !cacheEntry.expired) {
+          refreshModelsInBackground();
+        }
+
+        const models = await resolveModelsWithCacheFallback({
+          cacheEntry,
+          fetchModels: fetchAndCacheModelsSingleFlight,
+          logPrefix: primary.logPrefix,
+        });
 
         log(`${primary.logPrefix} Retrieved ${models.length} available ${primary.name} models`);
         const modelRegistry = buildModelRegistry(models, {
