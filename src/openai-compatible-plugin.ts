@@ -151,6 +151,41 @@ interface ConfigModelRegistryBuildOptions {
   logPrefix: string;
 }
 
+interface V2ModelRegistryBuildOptions {
+  providerID: string;
+  defaultFamily: string;
+  defaultContextLimit: number;
+  defaultOutputLimit: number;
+  buildDisplayName: (model: OpenAICompatibleModel) => string;
+  getVariants: (model: OpenAICompatibleModel) => ReasoningVariants | undefined;
+  logPrefix: string;
+}
+
+/** Shape of `Model.Info` from OpenCode V2's `@opencode/schema`. */
+export interface V2ModelInfo {
+  id: string;
+  modelID: string;
+  providerID: string;
+  name: string;
+  family: string;
+  capabilities: {
+    tools: boolean;
+    input: ConfigModelModality[];
+    output: ConfigModelModality[];
+    temperature: boolean;
+  };
+  variants: Array<{ id: string; settings?: Record<string, unknown> }>;
+  time: { released: number };
+  cost: Array<{
+    input: number;
+    output: number;
+    cache: { read: number; write: number };
+  }>;
+  status: 'active';
+  enabled: boolean;
+  limit: { context: number; output: number };
+}
+
 export function getOpenCodeCacheDirectory(): string {
   const xdgCacheHome = process.env.XDG_CACHE_HOME;
   if (xdgCacheHome) {
@@ -607,6 +642,78 @@ export function buildConfigModelRegistry(
   }
 
   return modelRegistry;
+}
+
+/** `parseFloat` yields `NaN` for empty or junk prices, which V2's schema rejects. */
+function parsePrice(rawPrice: string | undefined): number {
+  if (!rawPrice) {
+    return 0;
+  }
+
+  const price = parseFloat(rawPrice);
+  return Number.isFinite(price) ? price : 0;
+}
+
+/**
+ * Builds OpenCode V2 `Model.Info` entries for a discovered model list.
+ *
+ * V2 differs from the V1 config-hook shape: capabilities are flat (`tools`, `input`, `output`),
+ * cost is a tier array, variants are an array of `{ id, settings }`, and every model needs
+ * `modelID`, `time.released`, and `enabled`.
+ */
+export function buildV2ModelInfos(
+  models: OpenAICompatibleModel[],
+  opts: V2ModelRegistryBuildOptions
+): V2ModelInfo[] {
+  const modelInfos: V2ModelInfo[] = [];
+
+  for (const model of models) {
+    if (model.id === '__proto__' || model.id === 'constructor') {
+      log(`${opts.logPrefix} [ERROR] Skipping model with reserved id ${model.id}`);
+      continue;
+    }
+
+    const { input: inputMods, output: outputMods } = getModelModalities(model);
+    const variants = opts.getVariants(model);
+
+    modelInfos.push({
+      id: model.id,
+      modelID: model.id,
+      providerID: opts.providerID,
+      name: opts.buildDisplayName(model),
+      family: model.family ?? opts.defaultFamily,
+      capabilities: {
+        tools: model.supports_tool_calls ?? model.capabilities?.tools ?? true,
+        input: inputMods,
+        output: outputMods,
+        temperature: true,
+      },
+      variants: variants
+        ? Object.entries(variants).map(([variantID, settings]) => ({
+            id: variantID,
+            settings,
+          }))
+        : [],
+      time: { released: Date.now() },
+      cost: [
+        {
+          input: parsePrice(model.pricing?.prompt),
+          output: parsePrice(model.pricing?.completion),
+          cache: { read: parsePrice(model.pricing?.cache_prompt), write: 0 },
+        },
+      ],
+      status: 'active',
+      enabled: true,
+      limit: {
+        context:
+          model.context_length ?? model.capabilities?.contextWindow ?? opts.defaultContextLimit,
+        output:
+          model.max_completion_tokens ?? model.capabilities?.maxOutput ?? opts.defaultOutputLimit,
+      },
+    });
+  }
+
+  return modelInfos;
 }
 
 export function createOpenAICompatiblePlugin(config: OpenAICompatiblePluginConfig): Plugin {

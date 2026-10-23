@@ -9,6 +9,7 @@ gateway.
 
 - registers every configured endpoint as an OpenCode provider, each with its own id, name, base
   URL, and API key
+- runs on OpenCode v1 (config/provider/auth hooks) and v2 (`setup()` + `ctx.provider.transform`)
 - discovers models via `GET {baseURL}/models` for each endpoint
 - caches model metadata per endpoint in the OpenCode cache under `.cache/{id}-models.json`
 - uses cached models while they are fresh, and refetches once the cache passes its TTL so models
@@ -29,7 +30,8 @@ opencode plugin -g @tretrauit/opencode-openai-compatible
 
 ### Via `opencode.json`
 
-Add the plugin as a bare entry — no options tuple needed:
+OpenCode **v1** loads plugins from the `plugin` key. Add the plugin as a bare entry — no options
+tuple needed:
 
 ```json
 {
@@ -37,6 +39,18 @@ Add the plugin as a bare entry — no options tuple needed:
   "plugin": ["@tretrauit/opencode-openai-compatible"]
 }
 ```
+
+OpenCode **v2** uses the plural `plugins` key and calls the plugin's `setup()`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["@tretrauit/opencode-openai-compatible"]
+}
+```
+
+Both forms are served by the same package: the default export carries `server` (v1) and
+`setup` (v2). Differences on v2 are listed under [Behavior notes](#behavior-notes).
 
 Endpoint configuration is loaded from a **separate config file** named
 `opencode-openai-compatible.json`. Put it next to your global `opencode.json` (usually
@@ -68,6 +82,9 @@ With this example you get two providers: `crofai` (with its API key read from th
 gets the interactive `/connect` auth flow and the runtime provider hook; when omitted the first
 provider is used. The config file uses the **same schema** as the plugin options documented
 below.
+
+On OpenCode v2 there is no `/connect` flow and no `primary`: every endpoint is registered, so
+give each one an `apiKey` (literal or `{env:...}`) right in this file.
 
 #### Config file resolution
 
@@ -151,7 +168,7 @@ same fields as the options object.
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `providers` | `OpenAICompatibleEndpointOptions[]` | `[]` | Endpoints to register. If empty, the plugin is inactive. |
-| `primary` | `string` | first provider's `id` | Provider id that receives the runtime `provider.models()` hook and the `/connect` auth hook. |
+| `primary` | `string` | first provider's `id` | v1 only. Provider id that receives the runtime `provider.models()` hook and the `/connect` auth hook. Ignored on v2, where every endpoint is registered. |
 | `fetchTimeoutMs` | `number` | `30000` | Timeout for each `GET {baseURL}/models` request. |
 
 ### `providers[]` endpoint options
@@ -161,9 +178,9 @@ same fields as the options object.
 | `id` | `string` | — (required) | Provider id, e.g. `crofai`. Must be unique across endpoints. |
 | `name` | `string` | — (required) | Display name, e.g. `CrofAI`. |
 | `baseURL` | `string` | — (required) | Base URL of the OpenAI-compatible API, e.g. `https://crof.ai/v1`. |
-| `apiKey` | `string` | — | API key injected into the provider's `options.apiKey`. A `{env:MY_API_KEY}` placeholder is expanded from the environment when the plugin starts; if the variable is unset or empty the plugin logs `[ERROR]` and registers the provider without the key (it never sends the raw placeholder as a credential). A literal value is used as-is. |
+| `apiKey` | `string` | — | API key injected into the provider's `options.apiKey` (v2: `settings.apiKey`). A `{env:MY_API_KEY}` placeholder is expanded from the environment when the plugin starts; if the variable is unset or empty the plugin logs `[ERROR]` and registers the provider without the key (it never sends the raw placeholder as a credential). A literal value is used as-is. |
 | `headers` | `Record<string, string>` | — | Extra headers injected into the provider's `options.headers`. |
-| `auth` | `OpenAICompatibleEndpointAuth` | — | Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
+| `auth` | `OpenAICompatibleEndpointAuth` | — | v1 only. Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
 | `cacheFile` | `string` | `{id}-models.json` | Cache file name under `.cache/`. |
 | `cacheTtlMs` | `number` | `300000` (5 min) | How long a cached model list may be used to register this endpoint. See [Model cache TTL](#model-cache-ttl). |
 | `modelEndpoint` | `string` | `/models` | Path appended to `baseURL` for model discovery. |
@@ -182,6 +199,10 @@ same fields as the options object.
 - `{env:...}` placeholders are expanded by this plugin at startup, before any model request is
   made. A missing or empty variable is reported with `[ERROR]` and the provider is registered
   without a key rather than sending the literal placeholder.
+- **OpenCode v2 has no interactive auth.** The plugin cannot open `/connect` there; every
+  endpoint's key comes from the endpoint `apiKey` (or `headers`) and becomes the provider's
+  `settings.apiKey`. The key is passed straight to the endpoint as
+  `Authorization: Bearer <key>`.
 
 ## Model cache TTL
 
@@ -300,6 +321,16 @@ effort levels only. OpenCode's `budget_tokens` form of `reasoning_options` does 
 
 ## Behavior notes
 
+- **OpenCode v2**: the plugin registers providers and models through
+  `ctx.provider.transform(...)` during `setup()`. There is no `config`, `provider.models()` or
+  `auth` hook on v2; the captured model list is replayed by the transform. Model discovery runs
+  during `setup()`, and the returned cleanup function stops the background refresh timer. The
+  timer runs at the smallest `cacheTtlMs` among configured endpoints (never less than 60s) and
+  calls `ctx.provider.reload()` after each refresh. Provider ids and model ids (including ids
+  containing `/`) are passed through verbatim.
+- **OpenCode v2 provider package**: `npm` defaults to OpenCode's bundled
+  `@opencode/ai/providers/openai-compatible`; any other `@ai-sdk/*` package is reported as
+  `aisdk:<package>`.
 - **OpenCode 1.14.31+**: all endpoints are registered by mutating `outputConfig.provider[id]`
   in the `config` hook, eagerly (models are fetched/cached before the provider entry is
   written). This is the only reliable registration path for providers that aren't in OpenCode's
@@ -312,13 +343,13 @@ effort levels only. OpenCode's `budget_tokens` form of `reasoning_options` does 
   `$XDG_CACHE_HOME/opencode` when set).
 - Empty model lists are never cached. A stale cache file containing zero models is ignored
   and treated as missing, so the plugin refetches instead of registering an empty provider.
-- **OpenCode 1.18.15 plugin loading**: the package default export remains the classic
-  `{ id, server }` module. OpenCode 1.18 keeps loading that shape for entries in the `plugin`
+- **OpenCode 1.18.15 plugin loading**: the package default export carries both `id` + `server`
+  (v1) and `setup` (v2). OpenCode 1.18 keeps loading that shape for entries in the `plugin`
   array (the loader accepts `{ id, server }` objects, plain default functions, and named
   `server` exports). OpenCode also probes the newer `{ id, effect }` / `{ id, setup }`
   config-plugin schema for the same entries; a `SchemaError` logged against a plugin while
   both schemas are tried is benign — the legacy loader that actually registers this plugin's
-  `config`/`provider`/`auth` hooks still runs it. The extra keys are not needed for 1.18.15.
+  `config`/`provider`/`auth` hooks still runs it.
 - The config hook merges discovered models with any models you defined yourself for the same
   provider id — your explicit config models win.
 - User-provided provider fields (e.g. `env`, `blacklist`, `whitelist`) are preserved.
@@ -335,12 +366,24 @@ bun install
 bun run build
 ```
 
-Point OpenCode at the built plugin:
+Point OpenCode at the built plugin.
+
+OpenCode v1 (`plugin` key) accepts the built file:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["./dist/index.js"]
+}
+```
+
+OpenCode v2 (`plugins` key) needs a **directory** — a file path is rejected with
+`configured plugin path must be a directory`. Point it at `dist`, which contains `index.js`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["F:/path/to/opencode-openai-compatible/dist"]
 }
 ```
 

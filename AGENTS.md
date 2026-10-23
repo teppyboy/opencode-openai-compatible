@@ -231,6 +231,46 @@ Real OpenCode model schema:
 - The `xhigh` and `max` levels are an ACCEPTED, UNVERIFIED assumption: they were never probed
   against upstream, and the risk was explicitly accepted — do not re-litigate or probe to confirm
 
+### OpenCode V2
+
+V2 support is a SECOND entrypoint on the same default export, not a replacement: `setup()` for
+V2, `server()` for V1. `Plugin.define` is identity, so no `@opencode/plugin` dependency is added.
+
+- `src/plugin.ts` `createOpenAICompatibleEndpointsPluginV2()` returns `{ id, setup }`. V2 has NO
+  `config`, `provider.models()` or `auth` hook: providers are contributed once through
+  `await ctx.provider.transform((editor) => editor.add({ info, models }))`
+- Model discovery runs during `setup()`. The config resolver is fed
+  `{ directory: ctx.location.directory, worktree: ctx.location.project.canonical }`, and
+  `ctx.options` is the fallback options object. Endpoints that discover no models are skipped
+- `Provider.Info` requires `id`, `name`, `activation`, `package`. `activation` is `'enabled'`.
+  `package` maps `@ai-sdk/openai-compatible` (the default `npm`) to OpenCode's bundled
+  `@opencode/ai/providers/openai-compatible`; any other `@ai-sdk/*` becomes `aisdk:<pkg>`;
+  anything else passes through untouched
+- Credentials go through `settings.apiKey` / `settings.headers` (same `{env:}` expansion as V1).
+  There is NO interactive `/connect` flow on V2 and no integration is needed: verified against
+  OpenCode 2.1.4 that a real chat request reached the configured `baseURL` carrying
+  `Authorization: Bearer <apiKey>`
+- `buildV2ModelInfos` produces `Model.Info`: `id`/`modelID`/`providerID`, flat
+  `capabilities {tools,input,output,temperature}`, `variants` as `[{id, settings}]` (camelCase
+  `reasoningEffort`, same levels as V1), `cost: [{input,output,cache:{read,write}}]`,
+  `time.released` (Date.now), `status: 'active'`, `enabled: true`, `limit {context,output}`
+- `parsePrice` guards `cost`: `parseFloat('')` is `NaN` and V2's schema rejects it, so empty or
+  junk prices become `0`
+- Model ids containing `/` are kept verbatim (verified live: `nvidia/fake/second`)
+- Background refresh: `setInterval` at the MINIMUM `cacheTtlMs` across endpoints, floored at
+  `MIN_MODEL_REFRESH_INTERVAL_MS` (60s), calling `discoverAll()` then `ctx.provider.reload()`.
+  `setup()` returns the cleanup that clears it. `cacheTtlMs <= 0` (or non-finite) skips the timer
+  entirely
+- V2 config key is `plugins` (plural, `ConfigPlugin.Plugins`). A path entry MUST be a directory:
+  a file path is dropped with `WARN "configured plugin path must be a directory"`. Pointing at
+  the built `dist/` directory works and loads `index.js`; the repo ROOT does not load (reason
+  unverified)
+- VERIFY V2 CHANGES WITH `/api/model`, NOT `/api/provider`: in a standalone server `/api/provider`
+  returned `[]` even for declarative `providers`, while `/api/model` listed the
+  transform-contributed models. `GET /api/provider/{id}` returns `ProviderNotFoundError` for a
+  plugin-added provider, which is not a failure signal
+- The endpoint `primary` option and the `auth` option are V1-only and ignored on V2
+
 ### Duplicate `/connect` Entry: DISPROVEN
 
 A reported duplicate provider entry in `/connect` was NOT caused by this plugin registering
@@ -243,13 +283,14 @@ REVERTED and must stay reverted.
 ### Architecture
 
 - `src/plugin.ts` - multi-endpoint plugin server (`createOpenAICompatibleEndpointsPlugin`) and
-  endpoint/plugin option types
+  V2 entrypoint (`createOpenAICompatibleEndpointsPluginV2`) plus endpoint/plugin option types
 - `src/openai-compatible-plugin.ts` - shared single-provider factory
   (`createOpenAICompatiblePlugin`) plus reusable module-level helpers
   (`readModelCacheEntry`/`readModelCache`/`writeModelCache`/`resolveModelsWithCacheFallback`/
   `normalizeCacheTtlMs`/`fetchModels`/`buildModelRegistry`/`buildConfigModelRegistry`/
-  `buildVariantDisplayName`/`createReasoningVariants`)
-- `src/index.ts` - package root entrypoint; exports ONLY the `{ id, server }` plugin module
+  `buildV2ModelInfos`/`buildVariantDisplayName`/`createReasoningVariants`)
+- `src/index.ts` - package root entrypoint; exports ONLY the dual default module
+  `{ id, setup, server }` (V2 reads `id`/`setup`, V1 calls `server`)
 - `src/factory.ts` - public factory subpath entrypoint for reusable helper exports
 - `src/logger.ts` - optional debug logger
 - The factory (`src/openai-compatible-plugin.ts`) intentionally retains a log-only `chat.params`

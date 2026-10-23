@@ -7,6 +7,7 @@ import type { OpenAICompatibleModel } from './openai-compatible-plugin.js';
 import {
   buildConfigModelRegistry,
   buildModelRegistry,
+  buildV2ModelInfos,
   buildVariantDisplayName,
   createReasoningVariants,
   fetchModels,
@@ -18,6 +19,7 @@ import {
 } from './openai-compatible-plugin.js';
 
 const PLUGIN_NAME = 'opencode-openai-compatible';
+const PLUGIN_MODULE_ID = '@tretrauit/opencode-openai-compatible';
 const CONFIG_FILE_NAMES = [
   'opencode-openai-compatible.json',
   'opencode-openai-compatible.jsonc',
@@ -26,11 +28,14 @@ const OPENCODE_CONFIG_DIR_NAME = 'opencode';
 const OPENCODE_PROJECT_DIR_NAME = '.opencode';
 const CONFIG_PATH_ENV_VAR = 'OPENCODE_OPENAI_COMPATIBLE_CONFIG';
 const DEFAULT_PROVIDER_NPM = '@ai-sdk/openai-compatible';
+const DEFAULT_V2_PROVIDER_PACKAGE = '@opencode/ai/providers/openai-compatible';
 const DEFAULT_MODEL_ENDPOINT = '/models';
 const DEFAULT_CONTEXT_LIMIT = 202752;
 const DEFAULT_OUTPUT_LIMIT = 202752;
 const DEFAULT_FAMILY = 'unknown';
 const DEFAULT_FETCH_TIMEOUT_MS = 30000;
+/** Keeps a tiny `cacheTtlMs` from turning the V2 refresh timer into a request loop. */
+const MIN_MODEL_REFRESH_INTERVAL_MS = 60000;
 const ENV_PLACEHOLDER_PATTERN = /^\{env:([^}]*)\}$/;
 
 export interface OpenAICompatibleEndpointAuth {
@@ -393,26 +398,14 @@ function resolveEndpoint(endpoint: OpenAICompatibleEndpointOptions): ResolvedEnd
   };
 }
 
-export async function createOpenAICompatibleEndpointsPlugin(
-  input: any,
-  options?: OpenAICompatiblePluginOptions
-): Promise<Hooks> {
-  await initLogger(input.client);
-  log(`[${PLUGIN_NAME} Plugin] Plugin initializing...`);
-
-  const resolvedOptions = resolvePluginConfig(input, options);
-  const providedProviders = resolvedOptions?.providers ?? [];
-  if (providedProviders.length === 0) {
-    log(
-      `[${PLUGIN_NAME} Plugin] No providers configured; plugin inactive. Configure endpoints via the opencode-openai-compatible.json config file or plugin options in opencode.json`
-    );
-    return {};
-  }
-
+/** Drops endpoints that cannot be registered and resolves the rest. */
+function resolveConfiguredProviders(
+  resolvedOptions: OpenAICompatiblePluginOptions | null
+): ResolvedEndpoint[] {
   const seenIds = new Set<string>();
   const providers: ResolvedEndpoint[] = [];
 
-  for (const endpoint of providedProviders) {
+  for (const endpoint of resolvedOptions?.providers ?? []) {
     if (typeof endpoint.id !== 'string' || endpoint.id.trim() === '') {
       log(`[${PLUGIN_NAME} Plugin] [ERROR] Skipping provider with missing id`);
       continue;
@@ -438,8 +431,93 @@ export async function createOpenAICompatibleEndpointsPlugin(
     providers.push(resolveEndpoint(endpoint));
   }
 
+  return providers;
+}
+
+/** Reads the cache, refetches when stale, and falls back to the stale list on failure. */
+async function discoverEndpointModels(
+  endpoint: ResolvedEndpoint,
+  fetchTimeoutMs: number
+): Promise<OpenAICompatibleModel[]> {
+  const cacheEntry = readModelCacheEntry(
+    endpoint.cachePath,
+    endpoint.logPrefix,
+    endpoint.cacheTtlMs
+  );
+
+  return resolveModelsWithCacheFallback({
+    cacheEntry,
+    logPrefix: endpoint.logPrefix,
+    fetchModels: async () => {
+      const fetchedModels = await fetchModels(
+        endpoint.baseURL,
+        endpoint.apiKey ?? '',
+        endpoint.modelEndpoint,
+        fetchTimeoutMs,
+        endpoint.name
+      );
+      writeModelCache(endpoint.cachePath, fetchedModels, endpoint.logPrefix, Date.now());
+      return fetchedModels;
+    },
+  });
+}
+
+function describeDiscoveryError(error: unknown): string {
+  return error instanceof Error ? error.toString() : String(error);
+}
+
+function resolveV2ProviderPackage(npm: string): string {
+  if (npm === DEFAULT_PROVIDER_NPM) {
+    return DEFAULT_V2_PROVIDER_PACKAGE;
+  }
+
+  // V2 runs npm-backed AI SDK packages through its `aisdk:` runtime prefix.
+  return npm.startsWith('@ai-sdk/') ? `aisdk:${npm}` : npm;
+}
+
+/** Shape of `Provider.Info` from OpenCode V2's `@opencode/schema`. */
+function buildV2ProviderInfo(endpoint: ResolvedEndpoint) {
+  return {
+    id: endpoint.id,
+    name: endpoint.name,
+    activation: 'enabled',
+    package: resolveV2ProviderPackage(endpoint.npm),
+    settings: {
+      baseURL: endpoint.baseURL,
+      ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {}),
+      ...(endpoint.headers && Object.keys(endpoint.headers).length > 0
+        ? { headers: endpoint.headers }
+        : {}),
+    },
+  };
+}
+
+function buildV2ModelsForEndpoint(endpoint: ResolvedEndpoint, models: OpenAICompatibleModel[]) {
+  return buildV2ModelInfos(models, {
+    providerID: endpoint.id,
+    defaultFamily: endpoint.family,
+    defaultContextLimit: endpoint.contextLimit,
+    defaultOutputLimit: endpoint.outputLimit,
+    buildDisplayName: buildVariantDisplayName,
+    getVariants: createReasoningVariants,
+    logPrefix: endpoint.logPrefix,
+  });
+}
+
+export async function createOpenAICompatibleEndpointsPlugin(
+  input: any,
+  options?: OpenAICompatiblePluginOptions
+): Promise<Hooks> {
+  await initLogger(input.client);
+  log(`[${PLUGIN_NAME} Plugin] Plugin initializing...`);
+
+  const resolvedOptions = resolvePluginConfig(input, options);
+  const providers = resolveConfiguredProviders(resolvedOptions);
+
   if (providers.length === 0) {
-    log(`[${PLUGIN_NAME} Plugin] No valid providers configured; plugin inactive`);
+    log(
+      `[${PLUGIN_NAME} Plugin] No valid providers configured; plugin inactive. Configure endpoints via the opencode-openai-compatible.json config file or plugin options in opencode.json`
+    );
     return {};
   }
 
@@ -458,32 +536,10 @@ export async function createOpenAICompatibleEndpointsPlugin(
       for (const endpoint of providers) {
         let models: OpenAICompatibleModel[] = [];
         try {
-          const cacheEntry = readModelCacheEntry(
-            endpoint.cachePath,
-            endpoint.logPrefix,
-            endpoint.cacheTtlMs
-          );
-
-          models = await resolveModelsWithCacheFallback({
-            cacheEntry,
-            logPrefix: endpoint.logPrefix,
-            fetchModels: async () => {
-              const fetchedModels = await fetchModels(
-                endpoint.baseURL,
-                endpoint.apiKey ?? '',
-                endpoint.modelEndpoint,
-                fetchTimeoutMs,
-                endpoint.name
-              );
-              writeModelCache(endpoint.cachePath, fetchedModels, endpoint.logPrefix, Date.now());
-              return fetchedModels;
-            },
-          });
+          models = await discoverEndpointModels(endpoint, fetchTimeoutMs);
         } catch (error) {
           log(
-            `${endpoint.logPrefix} [ERROR] ${endpoint.name} failed: ${
-              error instanceof Error ? error.toString() : String(error)
-            }`
+            `${endpoint.logPrefix} [ERROR] ${endpoint.name} failed: ${describeDiscoveryError(error)}`
           );
         }
 
@@ -649,6 +705,109 @@ export async function createOpenAICompatibleEndpointsPlugin(
           },
         };
       },
+    },
+  };
+}
+
+export interface OpenAICompatibleV2Plugin {
+  id: string;
+  setup: (ctx: any) => Promise<(() => void) | void>;
+}
+
+/**
+ * OpenCode V2 entrypoint.
+ *
+ * V2 has no config or provider hook: providers and their models are contributed once through
+ * `ctx.provider.transform`, so discovery happens during `setup` and the transform replays the
+ * captured result. Credentials reach the endpoint through `settings.apiKey` instead of V1's
+ * auth loader.
+ */
+export function createOpenAICompatibleEndpointsPluginV2(
+  options?: OpenAICompatiblePluginOptions
+): OpenAICompatibleV2Plugin {
+  return {
+    id: PLUGIN_MODULE_ID,
+    async setup(ctx: any) {
+      await initLogger(ctx?.app);
+      log(`[${PLUGIN_NAME} Plugin] V2 plugin initializing...`);
+
+      const resolvedOptions = resolvePluginConfig(
+        {
+          directory: ctx?.location?.directory,
+          worktree: ctx?.location?.project?.canonical,
+        },
+        options ?? (ctx?.options as OpenAICompatiblePluginOptions | undefined)
+      );
+      const providers = resolveConfiguredProviders(resolvedOptions);
+
+      if (providers.length === 0) {
+        log(
+          `[${PLUGIN_NAME} Plugin] No valid providers configured; plugin inactive. Configure endpoints via the opencode-openai-compatible.json config file or plugin options in opencode.json`
+        );
+        return;
+      }
+
+      const fetchTimeoutMs = resolvedOptions?.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+      const sources: Array<{ endpoint: ResolvedEndpoint; models: OpenAICompatibleModel[] }> = [];
+
+      const discoverAll = async () => {
+        const discovered = await Promise.all(
+          providers.map(async (endpoint) => {
+            try {
+              return { endpoint, models: await discoverEndpointModels(endpoint, fetchTimeoutMs) };
+            } catch (error) {
+              log(
+                `${endpoint.logPrefix} [ERROR] ${endpoint.name} failed: ${describeDiscoveryError(error)}`
+              );
+              return { endpoint, models: [] };
+            }
+          })
+        );
+
+        sources.length = 0;
+        for (const source of discovered) {
+          if (source.models.length === 0) {
+            log(
+              `${source.endpoint.logPrefix} [ERROR] No models for ${source.endpoint.id}; skipping provider`
+            );
+            continue;
+          }
+
+          sources.push(source);
+        }
+      };
+
+      await discoverAll();
+
+      await ctx.provider.transform((editor: any) => {
+        for (const { endpoint, models } of sources) {
+          editor.add({
+            info: buildV2ProviderInfo(endpoint),
+            models: buildV2ModelsForEndpoint(endpoint, models),
+          });
+          log(
+            `${endpoint.logPrefix} Registered provider ${endpoint.id} with ${models.length} discovered models`
+          );
+        }
+      });
+
+      const refreshIntervalMs = Math.min(...providers.map((endpoint) => endpoint.cacheTtlMs));
+      if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs <= 0) {
+        return;
+      }
+
+      const timer = globalThis.setInterval(
+        () => {
+          void discoverAll()
+            .then(() => ctx.provider.reload())
+            .catch((error) => {
+              log(`[${PLUGIN_NAME} Plugin] Model refresh failed: ${describeDiscoveryError(error)}`);
+            });
+        },
+        Math.max(refreshIntervalMs, MIN_MODEL_REFRESH_INTERVAL_MS)
+      );
+
+      return () => globalThis.clearInterval(timer);
     },
   };
 }

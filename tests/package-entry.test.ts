@@ -10,6 +10,7 @@ describe('package entrypoints', () => {
     expect(Object.keys(mod).sort()).toEqual(['default']);
     expect(mod.default.id).toBe('@tretrauit/opencode-openai-compatible');
     expect(typeof mod.default.server).toBe('function');
+    expect(typeof mod.default.setup).toBe('function');
   });
 
   it('exports reusable helpers from the factory subpath', async () => {
