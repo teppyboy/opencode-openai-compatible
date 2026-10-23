@@ -1,23 +1,23 @@
 # @tretrauit/opencode-openai-compatible
 
-OpenCode plugin that registers **one or more configurable OpenAI-compatible endpoints** as
-providers. Point it at any API that speaks the OpenAI chat completions / models protocol — a
-hosted service like CrofAI or Groq, a local server like LM Studio or llama.cpp, or a self-hosted
-gateway.
+Registers one or more OpenAI-compatible endpoints as OpenCode providers. Any API that speaks the
+OpenAI chat completions and models protocol works: CrofAI, Groq, a local LM Studio or llama.cpp
+server, a self-hosted gateway.
 
 ## What it does
 
-- registers every configured endpoint as an OpenCode provider, each with its own id, name, base
-  URL, and API key
-- runs on OpenCode v1 (config/provider/auth hooks) and v2 (`setup()` + `ctx.provider.transform`)
-- discovers models via `GET {baseURL}/models` for each endpoint
-- caches model metadata per endpoint in the OpenCode cache under `.cache/{id}-models.json`
-- uses cached models while they are fresh, and refetches once the cache passes its TTL so models
-  added on the endpoint show up on the next start rather than the one after
-- keeps a stale cache as an offline fallback when an endpoint is unreachable
-- reads either the modern `capabilities` object or the older flat model fields
-- normalizes variant names like `Lightning` and `Precision` without duplicate suffixes
-- exposes `low` / `medium` / `high` reasoning variants for reasoning-capable models, plus a
+- registers every configured endpoint as an OpenCode provider with its own id, name, base URL and
+  API key
+- works on OpenCode v1 (config, provider and auth hooks) and v2 (`setup()` with
+  `ctx.provider.transform`)
+- discovers models from `GET {baseURL}/models` for each endpoint
+- caches model metadata per endpoint in the OpenCode cache at `.cache/{id}-models.json`
+- registers cached models while they are fresh and refetches once the cache passes its TTL, so a
+  model added on the endpoint shows up on the next start
+- falls back to a stale cache when an endpoint is unreachable
+- reads either the `capabilities` object or the older flat model fields
+- normalizes variant names such as `Lightning` and `Precision` without duplicate suffixes
+- exposes `low`, `medium` and `high` reasoning variants for reasoning-capable models, and a
   disabled level for models that allow turning reasoning off
 
 ## Install
@@ -30,8 +30,7 @@ opencode plugin -g @tretrauit/opencode-openai-compatible
 
 ### Via `opencode.json`
 
-OpenCode **v1** loads plugins from the `plugin` key. Add the plugin as a bare entry — no options
-tuple needed:
+OpenCode v1 reads the `plugin` key. A bare entry is enough:
 
 ```json
 {
@@ -40,7 +39,7 @@ tuple needed:
 }
 ```
 
-OpenCode **v2** uses the plural `plugins` key and calls the plugin's `setup()`:
+OpenCode v2 reads the plural `plugins` key and calls the plugin's `setup()`:
 
 ```json
 {
@@ -49,13 +48,12 @@ OpenCode **v2** uses the plural `plugins` key and calls the plugin's `setup()`:
 }
 ```
 
-Both forms are served by the same package: the default export carries `server` (v1) and
-`setup` (v2). Differences on v2 are listed under [Behavior notes](#behavior-notes).
+One package serves both. The default export has `server` for v1 and `setup` for v2; what differs
+on v2 is under [Behavior notes](#behavior-notes).
 
-Endpoint configuration is loaded from a **separate config file** named
-`opencode-openai-compatible.json`. Put it next to your global `opencode.json` (usually
-`~/.config/opencode/`) to configure endpoints for every project, or in a project directory to
-configure that project only:
+Endpoint configuration lives in a separate file, `opencode-openai-compatible.json`. Put it next
+to your global `opencode.json` (usually `~/.config/opencode/`) to share endpoints across projects,
+or in a project directory to configure that project alone:
 
 ```json
 {
@@ -77,21 +75,19 @@ configure that project only:
 }
 ```
 
-With this example you get two providers: `crofai` (with its API key read from the
-`CROFAI_API_KEY` environment variable) and `local` (no key). `primary` selects which endpoint
-gets the interactive `/connect` auth flow and the runtime provider hook; when omitted the first
-provider is used. The config file uses the **same schema** as the plugin options documented
-below.
-
-On OpenCode v2 there is no `/connect` flow and no `primary`: every endpoint is registered, so
-give each one an `apiKey` (literal or `{env:...}`) right in this file.
+This example registers two providers: `crofai`, whose key comes from the `CROFAI_API_KEY`
+environment variable, and `local`, which has no key. On v1, `primary` picks the endpoint that gets
+the interactive `/connect` flow and the runtime provider hook; without it the first provider is
+used. On v2 there is no `/connect` and `primary` does nothing, since every endpoint is registered,
+so give each endpoint an `apiKey` (literal or `{env:...}`) in this file. The file accepts the same
+schema as the plugin options below.
 
 #### Config file resolution
 
-Every candidate below is checked as `.json` first, then `.jsonc`. The first file that exists,
-is readable, and parses wins. Duplicate paths are only checked once.
+Each candidate is checked as `.json` first, then `.jsonc`. The first file that exists, is readable
+and parses wins. Paths are deduplicated.
 
-1. `OPENCODE_OPENAI_COMPATIBLE_CONFIG` environment variable — an explicit path to the config
+1. The `OPENCODE_OPENAI_COMPATIBLE_CONFIG` environment variable, an explicit path to the config
    file. The path may be absolute or relative to the current working directory; on Windows use
    the native path (e.g. `C:\Users\you\.config\opencode\opencode-openai-compatible.json`) or
    forward slashes. If the file is missing or malformed, the plugin logs `[ERROR]` and moves on
@@ -103,18 +99,18 @@ is readable, and parses wins. Duplicate paths are only checked once.
 5. `<worktree>/.opencode/opencode-openai-compatible.json`
 6. `$OPENCODE_CONFIG_DIR/opencode-openai-compatible.json` (when the variable is set)
 7. `$XDG_CONFIG_HOME/opencode/opencode-openai-compatible.json` (when the variable is set)
-8. `~/.config/opencode/opencode-openai-compatible.json` — **the global config location**
+8. `~/.config/opencode/opencode-openai-compatible.json`, the global config location
 9. `%APPDATA%\opencode\opencode-openai-compatible.json` (Windows, when set)
 10. `%LOCALAPPDATA%\opencode\opencode-openai-compatible.json` (Windows, when set)
-11. Legacy plugin options (the tuple form below) — used only after every candidate above misses.
+11. Legacy plugin options (the tuple form below), used only after every candidate above misses.
 
-When no config file is found, the plugin logs the full list of attempted paths, which is the
-fastest way to see where it expected your file.
+If nothing is found, the plugin logs every path it tried. That list is the quickest way to see
+where the file was expected.
 
 #### JSONC tolerance
 
-The plugin config file is parsed leniently. `//` line comments, `/* */` block comments, and
-trailing commas are all accepted in both `.json` and `.jsonc` files:
+Line comments (`//`), block comments (`/* */`) and trailing commas are accepted in both `.json`
+and `.jsonc` files:
 
 ```jsonc
 {
@@ -130,13 +126,12 @@ trailing commas are all accepted in both `.json` and `.jsonc` files:
 }
 ```
 
-This tolerance applies **only** to this plugin's config file. The model cache is still parsed as
-strict JSON.
+Only this plugin's config file is lenient. The model cache is still parsed as strict JSON.
 
 #### Legacy tuple options
 
-The tuple form still works when no config file exists — the second element is passed verbatim
-to the plugin as its options:
+The tuple form still works when no config file exists. The second element is passed to the plugin
+as its options:
 
 ```json
 {
@@ -161,9 +156,8 @@ to the plugin as its options:
 
 ## Options
 
-The plugin options object is the second element of the `plugin` tuple — or the top-level
-fields of `opencode-openai-compatible.json`. Both use the same schema; a config file holds the
-same fields as the options object.
+The options object is the second element of the `plugin` tuple, or the top level of
+`opencode-openai-compatible.json`. Both use the same schema.
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
@@ -175,12 +169,12 @@ same fields as the options object.
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `id` | `string` | — (required) | Provider id, e.g. `crofai`. Must be unique across endpoints. |
-| `name` | `string` | — (required) | Display name, e.g. `CrofAI`. |
-| `baseURL` | `string` | — (required) | Base URL of the OpenAI-compatible API, e.g. `https://crof.ai/v1`. |
-| `apiKey` | `string` | — | API key injected into the provider's `options.apiKey` (v2: `settings.apiKey`). A `{env:MY_API_KEY}` placeholder is expanded from the environment when the plugin starts; if the variable is unset or empty the plugin logs `[ERROR]` and registers the provider without the key (it never sends the raw placeholder as a credential). A literal value is used as-is. |
-| `headers` | `Record<string, string>` | — | Extra headers injected into the provider's `options.headers`. |
-| `auth` | `OpenAICompatibleEndpointAuth` | — | v1 only. Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
+| `id` | `string` | required | Provider id, e.g. `crofai`. Must be unique across endpoints. |
+| `name` | `string` | required | Display name, e.g. `CrofAI`. |
+| `baseURL` | `string` | required | Base URL of the OpenAI-compatible API, e.g. `https://crof.ai/v1`. |
+| `apiKey` | `string` | none | API key injected into the provider's `options.apiKey` (v2: `settings.apiKey`). A `{env:MY_API_KEY}` placeholder is expanded from the environment when the plugin starts; if the variable is unset or empty the plugin logs `[ERROR]` and registers the provider without the key (it never sends the raw placeholder as a credential). A literal value is used as-is. |
+| `headers` | `Record<string, string>` | none | Extra headers injected into the provider's `options.headers`. |
+| `auth` | `OpenAICompatibleEndpointAuth` | none | v1 only. Overrides for the primary endpoint's `/connect` auth method (`label`, `placeholder`, `message`). |
 | `cacheFile` | `string` | `{id}-models.json` | Cache file name under `.cache/`. |
 | `cacheTtlMs` | `number` | `300000` (5 min) | How long a cached model list may be used to register this endpoint. See [Model cache TTL](#model-cache-ttl). |
 | `modelEndpoint` | `string` | `/models` | Path appended to `baseURL` for model discovery. |
@@ -191,54 +185,49 @@ same fields as the options object.
 
 ## Auth
 
-- The **primary** endpoint gets the interactive `/connect` API-key auth flow (`type: 'api'`,
-  key `key`). The returned key is injected as `Authorization: Bearer <key>` on requests.
-- **Other** endpoints use `apiKey` from the endpoint config (plugin options or the config
-  file) instead — either an environment placeholder (`{env:...}`) or a literal value. They
-  don't need `/connect`.
-- `{env:...}` placeholders are expanded by this plugin at startup, before any model request is
-  made. A missing or empty variable is reported with `[ERROR]` and the provider is registered
-  without a key rather than sending the literal placeholder.
-- **OpenCode v2 has no interactive auth.** The plugin cannot open `/connect` there; every
-  endpoint's key comes from the endpoint `apiKey` (or `headers`) and becomes the provider's
-  `settings.apiKey`. The key is passed straight to the endpoint as
-  `Authorization: Bearer <key>`.
+- On v1 the primary endpoint gets the interactive `/connect` API-key flow (`type: 'api'`, key
+  `key`). The key is sent as `Authorization: Bearer <key>` on requests.
+- The other endpoints take their key from `apiKey` in the endpoint config, either an `{env:...}`
+  placeholder or a literal value. They don't use `/connect`.
+- Placeholders are expanded when the plugin starts, before any model request. If the variable is
+  missing or empty, the plugin logs `[ERROR]` and registers the provider without a key rather than
+  sending the raw placeholder.
+- v2 has no interactive auth. Every endpoint's key comes from `apiKey` or `headers` and becomes
+  the provider's `settings.apiKey`, sent as `Authorization: Bearer <key>`.
 
 ## Model cache TTL
 
-Each endpoint's discovered model list is cached under the OpenCode cache directory. The cache has
-a time-to-live, controlled per endpoint by `cacheTtlMs`:
+Each endpoint's model list is cached under the OpenCode cache directory, with a per-endpoint TTL
+from `cacheTtlMs`:
 
 | `cacheTtlMs` | Behavior |
 | ------------ | -------- |
 | absent / not a finite number | Defaults to `300000` (5 minutes). |
 | `> 0` | The cache registers models while `age < cacheTtlMs`. |
-| `0` | Never register from the cache — always fetch fresh. |
+| `0` | Never register from the cache, always fetch fresh. |
 | negative | Clamped to `0`, i.e. always fetch fresh. |
 
-A cache whose age is **exactly** the TTL counts as expired: freshness requires `age < ttl`.
+A cache at exactly the TTL is expired: freshness needs `age < ttl`.
 
-**Why this matters:** without a TTL, a model added on your endpoint only appeared after the
-*second* restart — the first restart registered the old cached list, and only refreshed it in the
-background for next time. With the TTL, an expired cache triggers discovery during the same
-startup, so a newly added model is selectable immediately.
+The TTL exists because a model added on your endpoint used to appear only after the second
+restart. The first restart registered the old cached list and refreshed it in the background for
+next time. With a TTL, an expired cache triggers discovery during the same startup, so a new model
+is selectable immediately.
 
-**Stale cache is still an offline fallback.** Expiry only means "don't register from this without
-checking". If discovery then fails (endpoint down, network gone, bad key), the expired list is
-used anyway so your provider keeps its previously known models instead of collapsing to zero. If
-there is no cache at all, the discovery error propagates.
+Expiry only means the cache is not used without checking. If discovery fails because the endpoint
+is down, the network is gone or the key is wrong, the expired list is used anyway, so the provider
+keeps its known models instead of collapsing to zero. With no cache at all, the discovery error
+propagates.
 
-Two further guarantees:
-
-- an empty model list is never written to the cache, and a cache file containing `models: []` is
-  treated as missing, so a transient "no models" answer can't poison the cache
-- a cache write is skipped when the on-disk list is *newer* than the list being written, so a slow
-  background refresh can't overwrite a fresher result
+Two more rules: an empty model list is never written, and a cache file containing `models: []` is
+treated as missing, so a transient "no models" answer can't poison the cache. A write is skipped
+when the on-disk list is newer than the list being written, so a slow background refresh can't
+overwrite a fresher result.
 
 ## Model metadata
 
-Model metadata is read from `GET {baseURL}/models`. Two shapes are supported, and **flat fields
-always win over the `capabilities` object** when both are present.
+Metadata comes from `GET {baseURL}/models`. Both shapes are supported, and flat fields win over
+the `capabilities` object when both are present.
 
 ### `capabilities` object
 
@@ -282,80 +271,74 @@ always win over the `capabilities` object** when both are present.
 ### Flat fields (take precedence)
 
 `context_length`, `max_completion_tokens`, `modalities`, `custom_reasoning`, `reasoning_effort`,
-`supports_tool_calls`, `family`, `name`, and `pricing` are read directly and override the
-equivalent capability. `custom_reasoning` / `reasoning_effort` are checked as a pair: if either is
+`supports_tool_calls`, `family`, `name` and `pricing` are read directly and override the
+equivalent capability. `custom_reasoning` and `reasoning_effort` are read as a pair: if either is
 present, they alone decide reasoning support and `capabilities.reasoning` is ignored.
 
 ### Models with no metadata
 
-A model that reports neither `capabilities` nor flat fields still registers. It falls back to
-`{ input: ['text'], output: ['text'] }`, `reasoning: false`, `tool_call: true`, and the
-endpoint's `contextLimit` / `outputLimit` defaults.
+A model with neither `capabilities` nor flat fields still registers. It falls back to
+`{ input: ['text'], output: ['text'] }`, `reasoning: false`, `tool_call: true`, and the endpoint's
+`contextLimit` / `outputLimit` defaults.
 
 ### Unsupported: `search`
 
-Some endpoints advertise a `capabilities.search` flag (on the reference endpoint: 86 of 89 models
-carry the key, 40 with `true`). The OpenCode model schema has **no field for it**, so the plugin
-ignores it entirely rather than inventing a slot. Unknown capability keys never block
-registration.
+Some endpoints advertise `capabilities.search` (86 of 89 models on the reference endpoint carry
+the key, 40 of them `true`). The OpenCode model schema has no field for it, so the plugin ignores
+it instead of inventing a slot. Unknown capability keys never block registration.
 
 ## Reasoning
 
-Reasoning-capable models are registered with `reasoning_options`, which is what OpenCode 1.18.15
-uses to build selectable reasoning levels:
+Reasoning-capable models are registered with `reasoning_options`, which OpenCode 1.18.15 turns into
+selectable reasoning levels:
 
 ```json
 { "reasoning_options": [{ "type": "effort", "values": ["low", "medium", "high"] }] }
 ```
 
-- models with `thinkingCanDisable: true` get `null` prepended, giving a "reasoning off" level
-- the runtime `provider.models()` hook (for OpenCode ≤ 1.14.30) exposes the same levels as
-  `variants`, using the **camelCase** `reasoningEffort` key — `@ai-sdk/openai-compatible`
-  serializes that into the `reasoning_effort` request field. A snake_case key there is silently
-  dropped
+Models with `thinkingCanDisable: true` get `null` prepended for an off level. The runtime
+`provider.models()` hook (OpenCode ≤ 1.14.30) exposes the same levels as `variants` with the
+camelCase `reasoningEffort` key, which `@ai-sdk/openai-compatible` serializes to
+`reasoning_effort`. A snake_case key is silently dropped there.
 
-**Budget-style thinking is not expressible.** Endpoints that report `thinkingFormat` values like
-`gemini-budget` or `claude-budget` with a `thinkingRange` are still registered with discrete
-effort levels only. OpenCode's `budget_tokens` form of `reasoning_options` does not survive the
-`@ai-sdk/openai-compatible` mapping, so the range is intentionally dropped.
+Budget-style thinking cannot be expressed. Endpoints reporting a `thinkingFormat` such as
+`gemini-budget` or `claude-budget` with a `thinkingRange` still register with discrete effort
+levels only, and the range is dropped, because OpenCode's `budget_tokens` form of
+`reasoning_options` does not survive the `@ai-sdk/openai-compatible` mapping.
 
 ## Behavior notes
 
-- **OpenCode v2**: the plugin registers providers and models through
-  `ctx.provider.transform(...)` during `setup()`. There is no `config`, `provider.models()` or
-  `auth` hook on v2; the captured model list is replayed by the transform. Model discovery runs
-  during `setup()`, and the returned cleanup function stops the background refresh timer. The
-  timer runs at the smallest `cacheTtlMs` among configured endpoints (never less than 60s) and
-  calls `ctx.provider.reload()` after each refresh. Provider ids and model ids (including ids
-  containing `/`) are passed through verbatim.
-- **OpenCode v2 provider package**: `npm` defaults to OpenCode's bundled
-  `@opencode/ai/providers/openai-compatible`; any other `@ai-sdk/*` package is reported as
+- On v2 the plugin registers providers and models through `ctx.provider.transform(...)` inside
+  `setup()`. There is no `config`, `provider.models()` or `auth` hook; the transform replays the
+  model list captured at setup. Discovery runs during `setup()`, and the cleanup function returned
+  from it stops the refresh timer. The timer uses the smallest `cacheTtlMs` among endpoints, with
+  a 60s floor, and calls `ctx.provider.reload()` after each refresh. Provider ids and model ids,
+  including ids with `/`, are passed through unchanged.
+- On v2 the `npm` option defaults to OpenCode's bundled
+  `@opencode/ai/providers/openai-compatible`. Any other `@ai-sdk/*` package is reported as
   `aisdk:<package>`.
-- **OpenCode 1.14.31+**: all endpoints are registered by mutating `outputConfig.provider[id]`
-  in the `config` hook, eagerly (models are fetched/cached before the provider entry is
-  written). This is the only reliable registration path for providers that aren't in OpenCode's
-  built-in models database.
-- **OpenCode ≤ 1.14.30 / catalog providers**: the primary endpoint also exposes a runtime
-  `provider.models()` hook that returns the same model registry, cache-first with background
-  refresh.
-- Each endpoint's model cache is written under the OpenCode cache directory:
-  `~/.cache/opencode/.cache/{cacheFile}` (or `$LOCALAPPDATA/opencode` on Windows, or
-  `$XDG_CACHE_HOME/opencode` when set).
-- Empty model lists are never cached. A stale cache file containing zero models is ignored
-  and treated as missing, so the plugin refetches instead of registering an empty provider.
-- **OpenCode 1.18.15 plugin loading**: the package default export carries both `id` + `server`
-  (v1) and `setup` (v2). OpenCode 1.18 keeps loading that shape for entries in the `plugin`
-  array (the loader accepts `{ id, server }` objects, plain default functions, and named
-  `server` exports). OpenCode also probes the newer `{ id, effect }` / `{ id, setup }`
-  config-plugin schema for the same entries; a `SchemaError` logged against a plugin while
-  both schemas are tried is benign — the legacy loader that actually registers this plugin's
-  `config`/`provider`/`auth` hooks still runs it.
-- The config hook merges discovered models with any models you defined yourself for the same
-  provider id — your explicit config models win.
-- User-provided provider fields (e.g. `env`, `blacklist`, `whitelist`) are preserved.
-- Reasoning-capable models (via `capabilities.reasoning`, or the flat `custom_reasoning` /
-  `reasoning_effort` fields) get `low`, `medium`, and `high` levels, plus a disabled level when
-  the endpoint reports `thinkingCanDisable`. See [Reasoning](#reasoning).
+- On OpenCode 1.14.31 and later, every endpoint is registered by writing
+  `outputConfig.provider[id]` in the `config` hook, with models fetched or cached first. That is
+  the only registration path that works for providers outside OpenCode's built-in models
+  database.
+- On OpenCode 1.14.30 and earlier, and for catalog providers, the primary endpoint also exposes a
+  `provider.models()` hook that returns the same registry, cache-first with a background refresh.
+- Model caches live under the OpenCode cache directory: `~/.cache/opencode/.cache/{cacheFile}`, or
+  `$LOCALAPPDATA/opencode` on Windows, or `$XDG_CACHE_HOME/opencode` when set.
+- Empty model lists are never cached. A cache file with zero models is treated as missing, so the
+  plugin refetches instead of registering an empty provider.
+- OpenCode 1.18.15 loads the default export shape with `id` and `server`, and the same object now
+  also carries `setup` for v2. The 1.18 loader accepts `{ id, server }` objects, plain default
+  functions and named `server` exports. OpenCode also probes the newer `{ id, effect }` and
+  `{ id, setup }` config-plugin schema for the same entries and logs a `SchemaError` while the two
+  schemas are tried. That message is benign, because the legacy loader that installs this plugin's
+  `config`, `provider` and `auth` hooks still runs.
+- The config hook merges discovered models with the models you defined for the same provider id,
+  and your entries win.
+- User-provided provider fields such as `env`, `blacklist` and `whitelist` are preserved.
+- Reasoning-capable models, recognized through `capabilities.reasoning` or the flat
+  `custom_reasoning` / `reasoning_effort` pair, get `low`, `medium` and `high`, plus a disabled
+  level when the endpoint reports `thinkingCanDisable`. See [Reasoning](#reasoning).
 
 ## Local development
 
@@ -366,9 +349,7 @@ bun install
 bun run build
 ```
 
-Point OpenCode at the built plugin.
-
-OpenCode v1 (`plugin` key) accepts the built file:
+v1 accepts the built file under `plugin`:
 
 ```json
 {
@@ -377,8 +358,8 @@ OpenCode v1 (`plugin` key) accepts the built file:
 }
 ```
 
-OpenCode v2 (`plugins` key) needs a **directory** — a file path is rejected with
-`configured plugin path must be a directory`. Point it at `dist`, which contains `index.js`:
+v2 needs a directory under `plugins`, because a file path is rejected with
+`configured plugin path must be a directory`. Point it at `dist`, which holds `index.js`:
 
 ```json
 {
